@@ -5,6 +5,48 @@ export interface VerificationProvider {
   sendCode(phone: string, code: string): Promise<void>;
 }
 
+export interface TwilioConfiguration {
+  accountSid: string;
+  authToken: string;
+  fromNumber: string;
+}
+
+export class TwilioVerificationProvider implements VerificationProvider {
+  constructor(private readonly configuration: TwilioConfiguration) {}
+
+  async sendCode(phone: string, code: string): Promise<void> {
+    const { accountSid, authToken, fromNumber } = this.configuration;
+    const body = new URLSearchParams({
+      Body: `Seu codigo de verificacao CriptSend e ${code}. Ele expira em ${String(Math.ceil(env.VERIFICATION_TTL_SECONDS / 60))} minutos.`,
+      From: fromNumber,
+      To: phone,
+    });
+
+    try {
+      const response = await fetch(
+        `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(accountSid)}/Messages.json`,
+        {
+          method: 'POST',
+          headers: {
+            authorization: `Basic ${Buffer.from(`${accountSid}:${authToken}`, 'utf8').toString('base64')}`,
+            'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+          },
+          body,
+          signal: AbortSignal.timeout(10_000),
+        },
+      );
+
+      if (response.ok) {
+        return;
+      }
+    } catch {
+      // Keep the public response identical for transport and provider failures.
+    }
+
+    throw new AppError(503, 'PHONE_VERIFICATION_UNAVAILABLE');
+  }
+}
+
 export class WebhookVerificationProvider implements VerificationProvider {
   async sendCode(phone: string, code: string): Promise<void> {
     if (!env.PHONE_VERIFICATION_WEBHOOK_URL) {
@@ -35,4 +77,20 @@ export class WebhookVerificationProvider implements VerificationProvider {
 
     throw new AppError(503, 'PHONE_VERIFICATION_UNAVAILABLE');
   }
+}
+
+export function createVerificationProvider(): VerificationProvider {
+  if (
+    env.TWILIO_ACCOUNT_SID &&
+    env.TWILIO_AUTH_TOKEN &&
+    env.TWILIO_FROM_NUMBER
+  ) {
+    return new TwilioVerificationProvider({
+      accountSid: env.TWILIO_ACCOUNT_SID,
+      authToken: env.TWILIO_AUTH_TOKEN,
+      fromNumber: env.TWILIO_FROM_NUMBER,
+    });
+  }
+
+  return new WebhookVerificationProvider();
 }

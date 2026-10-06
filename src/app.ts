@@ -9,7 +9,7 @@ import Fastify, {
 import { registerAuthRoutes } from './auth/auth-routes.js';
 import { registerAccountAccessRoutes } from './auth/account-access-routes.js';
 import {
-  WebhookVerificationProvider,
+  createVerificationProvider,
   type VerificationProvider,
 } from './auth/verification-provider.js';
 import { registerCallRoutes } from './calls/call-routes.js';
@@ -79,7 +79,7 @@ export async function buildApp(
   });
   await app.register(healthRoutes);
   const verificationProvider =
-    options.verificationProvider ?? new WebhookVerificationProvider();
+    options.verificationProvider ?? createVerificationProvider();
   const authService = await registerAuthRoutes(
     app,
     verificationProvider,

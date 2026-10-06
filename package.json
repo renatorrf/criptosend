@@ -13,6 +13,8 @@
     "lint": "eslint .",
     "test": "vitest run",
     "secrets:prepare": "tsx src/cli/prepare-local-secrets.ts",
+    "env:cloud:prepare": "tsx src/cli/prepare-cloud-env.ts",
+    "env:cloud:check": "tsx src/cli/prepare-cloud-env.ts --check",
     "admin:approve-reset": "tsx src/cli/approve-account-reset.ts",
     "db:migrate": "tsx src/database/cli.ts migrate",
     "db:rollback": "tsx src/database/cli.ts rollback",

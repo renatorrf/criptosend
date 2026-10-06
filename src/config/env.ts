@@ -92,6 +92,12 @@ const environmentSchema = z.object({
   ARGON2_PARALLELISM: z.coerce.number().int().min(1).max(16).default(1),
   PHONE_VERIFICATION_WEBHOOK_URL: optionalUrl,
   PHONE_VERIFICATION_WEBHOOK_TOKEN: optionalString,
+  TWILIO_ACCOUNT_SID: optionalString,
+  TWILIO_AUTH_TOKEN: optionalString,
+  TWILIO_FROM_NUMBER: z.preprocess(
+    (value) => (value === '' ? undefined : value),
+    z.string().regex(/^\+[1-9]\d{7,14}$/).optional(),
+  ),
   RTC_ICE_SERVERS_JSON: iceServersFromJson,
   RTC_TURN_URLS: turnUrlsFromString,
   RTC_TURN_SHARED_SECRET: z.preprocess(
@@ -151,6 +157,29 @@ if (
 ) {
   throw new Error(
     'Invalid or missing environment variables: PHONE_VERIFICATION_WEBHOOK_URL',
+  );
+}
+
+const twilioConfiguration = [
+  parsedEnvironment.data.TWILIO_ACCOUNT_SID,
+  parsedEnvironment.data.TWILIO_AUTH_TOKEN,
+  parsedEnvironment.data.TWILIO_FROM_NUMBER,
+];
+const configuredTwilioValues = twilioConfiguration.filter(Boolean).length;
+
+if (configuredTwilioValues > 0 && configuredTwilioValues < twilioConfiguration.length) {
+  throw new Error(
+    'Invalid or missing environment variables: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER',
+  );
+}
+
+if (
+  parsedEnvironment.data.NODE_ENV === 'production' &&
+  configuredTwilioValues === 0 &&
+  !parsedEnvironment.data.PHONE_VERIFICATION_WEBHOOK_URL
+) {
+  throw new Error(
+    'Invalid or missing environment variables: Twilio credentials or PHONE_VERIFICATION_WEBHOOK_URL',
   );
 }
 
