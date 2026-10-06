@@ -100,3 +100,4 @@ configure `RTC_TURN_URLS` e `RTC_TURN_SHARED_SECRET`; a rota
 `GET /calls/ice-config` gera usuário e senha de curta duração compatíveis com o
 TURN REST API do Coturn. O segredo compartilhado nunca é enviado ao cliente nem
 deve entrar no repositório. Há um modelo operacional em `infra/coturn`.
+"# criptosend" 
