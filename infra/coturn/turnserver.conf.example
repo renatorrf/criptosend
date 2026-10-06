@@ -1,0 +1,28 @@
+# Copie este arquivo fora do repositorio e injete os valores pelo gerenciador
+# de segredos/automacao da infraestrutura. Nao versione o arquivo renderizado.
+listening-port=3478
+tls-listening-port=5349
+fingerprint
+use-auth-secret
+static-auth-secret=CHANGE_WITH_SECRET_MANAGER
+realm=turn.example.com
+server-name=turn.example.com
+
+# Informe o IP publico; em NAT, use PUBLIC_IP/PRIVATE_IP.
+external-ip=203.0.113.10
+min-port=49160
+max-port=49200
+
+# Necessarios para turns: e recomendados em producao.
+cert=/run/secrets/turn-fullchain.pem
+pkey=/run/secrets/turn-privkey.pem
+
+no-tlsv1
+no-tlsv1_1
+stale-nonce=600
+no-multicast-peers
+no-loopback-peers
+total-quota=1200
+bps-capacity=0
+log-file=stdout
+simple-log

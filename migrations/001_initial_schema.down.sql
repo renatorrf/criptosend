@@ -1,0 +1,12 @@
+DROP TABLE IF EXISTS security_events;
+DROP TABLE IF EXISTS push_subscriptions;
+DROP TABLE IF EXISTS message_receipts;
+DROP TABLE IF EXISTS messages;
+DROP TABLE IF EXISTS conversation_members;
+DROP TABLE IF EXISTS conversations;
+DROP TABLE IF EXISTS auth_sessions;
+DROP TABLE IF EXISTS device_prekeys;
+DROP TABLE IF EXISTS devices;
+DROP TRIGGER IF EXISTS users_set_updated_at ON users;
+DROP TABLE IF EXISTS users;
+DROP FUNCTION IF EXISTS set_updated_at();
