@@ -46,11 +46,30 @@ const iceServersFromJson = z.preprocess((value) => {
   if (typeof value !== 'string') {
     return value;
   }
-  try {
-    return JSON.parse(value) as unknown;
-  } catch {
-    return value;
+  let unescapedValue = value;
+  while (unescapedValue.includes('\\"')) {
+    unescapedValue = unescapedValue.replaceAll('\\"', '"');
   }
+  const candidates = [
+    value,
+    unescapedValue,
+    value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value,
+    unescapedValue.startsWith('"') && unescapedValue.endsWith('"')
+      ? unescapedValue.slice(1, -1)
+      : unescapedValue,
+  ];
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      if (typeof parsed === 'string') {
+        return JSON.parse(parsed) as unknown;
+      }
+      return parsed;
+    } catch {
+      // Try the next representation. Older generated files escaped JSON twice.
+    }
+  }
+  return value;
 }, z.array(iceServerSchema).max(8));
 
 const turnUrlsFromString = z

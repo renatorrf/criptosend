@@ -42,6 +42,13 @@ function quote(value: string): string {
   return JSON.stringify(value);
 }
 
+function serialize(name: string, value: string): string {
+  if (name === 'RTC_ICE_SERVERS_JSON') {
+    return value;
+  }
+  return quote(value);
+}
+
 function operationalPending(environment: Record<string, string>): string[] {
   const pending: string[] = [];
   const webhookUrl = environment['PHONE_VERIFICATION_WEBHOOK_URL']?.trim();
@@ -250,7 +257,7 @@ if (checkOnly) {
     ...sections.flatMap(([title, names]) => [
       '',
       `# ${title}`,
-      ...names.map((name) => `${name}=${quote(values[name] ?? '')}`),
+      ...names.map((name) => `${name}=${serialize(name, values[name] ?? '')}`),
     ]),
     '',
   ].join('\n');
