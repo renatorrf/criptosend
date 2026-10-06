@@ -57,7 +57,13 @@ const verifySchema = z
   .object({ verificationId: uuid, code: z.string().regex(/^\d{6}$/) })
   .strict();
 const registrationSchema = z
-  .object({ ...flow, password, device: deviceSchema, recovery: recoverySchema })
+  .object({
+    ...flow,
+    name: z.string().trim().min(2).max(100),
+    password,
+    device: deviceSchema,
+    recovery: recoverySchema,
+  })
   .strict();
 const loginSchema = z
   .object({ ...flow, password: z.string().min(6).max(128), device: deviceSchema })
@@ -126,7 +132,8 @@ export function registerAccountAccessRoutes(
     path: '/auth',
     httpOnly: true,
     secure: env.AUTH_COOKIE_SECURE,
-    sameSite: 'strict' as const,
+    sameSite: env.NODE_ENV === 'production' ? ('none' as const) : ('lax' as const),
+    partitioned: env.NODE_ENV === 'production',
     maxAge: env.AUTH_REFRESH_TTL_SECONDS,
   };
   const respondWithSession = (
@@ -166,6 +173,7 @@ export function registerAccountAccessRoutes(
     const session = await service.register(
       body.verificationId,
       body.flowToken,
+      body.name,
       body.password,
       mapDevice(body.device),
       mapRecovery(body.recovery),

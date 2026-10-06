@@ -1,6 +1,6 @@
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
 import { env } from '../config/env.js';
@@ -57,6 +57,13 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   return parsed.data;
 }
 
+function assertTrustedOrigin(request: FastifyRequest): void {
+  const origin = request.headers.origin;
+  if (origin && !env.APP_ORIGINS.includes(origin)) {
+    throw new AppError(403, 'ORIGIN_NOT_ALLOWED');
+  }
+}
+
 function sessionResponse(tokens: {
   accessToken: string;
   accessExpiresInSeconds: number;
@@ -85,7 +92,8 @@ export async function registerAuthRoutes(
     path: '/auth',
     httpOnly: true,
     secure: env.AUTH_COOKIE_SECURE,
-    sameSite: 'strict' as const,
+    sameSite: env.NODE_ENV === 'production' ? ('none' as const) : ('lax' as const),
+    partitioned: env.NODE_ENV === 'production',
     maxAge: env.AUTH_REFRESH_TTL_SECONDS,
   };
 
@@ -137,6 +145,7 @@ export async function registerAuthRoutes(
     '/auth/refresh',
     { config: { rateLimit: { max: 30, timeWindow: '15 minutes' } } },
     async (request, reply) => {
+      assertTrustedOrigin(request);
       const refreshToken = request.cookies[env.AUTH_COOKIE_NAME];
       if (!refreshToken) {
         throw new AppError(401, 'INVALID_REFRESH_TOKEN');
@@ -148,6 +157,7 @@ export async function registerAuthRoutes(
   );
 
   app.post('/auth/logout', async (request, reply) => {
+    assertTrustedOrigin(request);
     await service.logout(request.cookies[env.AUTH_COOKIE_NAME]);
     reply.clearCookie(env.AUTH_COOKIE_NAME, cookieOptions);
     return reply.code(204).send();

@@ -379,6 +379,7 @@ export class AccountAccessService {
   async register(
     verificationId: string,
     flowToken: string,
+    name: string,
     password: string,
     device: DeviceInput,
     recovery: RecoveryCredentialInput,
@@ -388,9 +389,6 @@ export class AccountAccessService {
     try {
       const challenge = await this.lockFlow(client, verificationId);
       assertFlow(challenge, flowToken);
-      if (!challenge.requested_name_encrypted) {
-        throw new AppError(400, 'INVALID_ACCESS_FLOW');
-      }
       const existing = await client.query(
         `SELECT 1 FROM ${schema}.users WHERE phone_lookup_hash = $1`,
         [challenge.phone_lookup_hash],
@@ -405,10 +403,7 @@ export class AccountAccessService {
           userId,
           encryptField(decryptField(challenge.phone_encrypted, 'phone'), 'phone'),
           challenge.phone_lookup_hash,
-          encryptField(
-            decryptField(challenge.requested_name_encrypted, 'access-name'),
-            'user-name',
-          ),
+          encryptField(name.trim(), 'user-name'),
         ],
       );
       await client.query(

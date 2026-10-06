@@ -49,6 +49,27 @@ describe('health routes', () => {
     expect(response.body).not.toContain('123');
   });
 
+  it('rejects cross-origin refresh and logout requests', async () => {
+    const app = await buildApp();
+    apps.push(app);
+
+    const [refresh, logout] = await Promise.all([
+      app.inject({
+        method: 'POST',
+        url: '/auth/refresh',
+        headers: { origin: 'https://untrusted.example' },
+      }),
+      app.inject({
+        method: 'POST',
+        url: '/auth/logout',
+        headers: { origin: 'https://untrusted.example' },
+      }),
+    ]);
+
+    expect(refresh.statusCode).toBe(403);
+    expect(logout.statusCode).toBe(403);
+  });
+
   it('protects conversation and message routes with authentication', async () => {
     const app = await buildApp();
     apps.push(app);
