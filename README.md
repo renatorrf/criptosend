@@ -101,3 +101,4 @@ configure `RTC_TURN_URLS` e `RTC_TURN_SHARED_SECRET`; a rota
 TURN REST API do Coturn. O segredo compartilhado nunca é enviado ao cliente nem
 deve entrar no repositório. Há um modelo operacional em `infra/coturn`.
 "# criptosend" 
+"# Cripto-Backend" 
