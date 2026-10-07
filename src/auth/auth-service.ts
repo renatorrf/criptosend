@@ -142,10 +142,12 @@ export class AuthService {
   async startRegistration(phoneInput: string): Promise<{
     verificationId: string;
     expiresInSeconds: number;
+    testCode?: string;
   }> {
     const phone = normalizePhone(phoneInput);
     const verificationId = randomUUID();
-    const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
+    const generatedCode = randomInt(0, 1_000_000).toString().padStart(6, '0');
+    const code = this.verificationProvider.resolveCode?.(phone, generatedCode) ?? generatedCode;
     const expiresAt = new Date(Date.now() + env.VERIFICATION_TTL_SECONDS * 1_000);
 
     await databasePool.query(
@@ -173,9 +175,11 @@ export class AuthService {
       throw error;
     }
 
+    const testCode = this.verificationProvider.disclosedCode?.(phone);
     return {
       verificationId,
       expiresInSeconds: env.VERIFICATION_TTL_SECONDS,
+      ...(testCode ? { testCode } : {}),
     };
   }
 

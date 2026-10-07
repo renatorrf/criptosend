@@ -20,6 +20,21 @@ const optionalString = z.preprocess(
   z.string().min(1).optional(),
 );
 
+const testVerificationCodesFromJson = z.preprocess((value) => {
+  if (value === undefined || value === '') return {};
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+}, z
+  .record(
+    z.string().regex(/^\+[1-9]\d{7,14}$/),
+    z.string().regex(/^\d{6}$/),
+  )
+  .refine((codes) => Object.keys(codes).length <= 10));
+
 const iceServerSchema = z
   .object({
     urls: z.union([
@@ -111,6 +126,7 @@ const environmentSchema = z.object({
   ARGON2_PARALLELISM: z.coerce.number().int().min(1).max(16).default(1),
   PHONE_VERIFICATION_WEBHOOK_URL: optionalUrl,
   PHONE_VERIFICATION_WEBHOOK_TOKEN: optionalString,
+  PHONE_VERIFICATION_TEST_CODES_JSON: testVerificationCodesFromJson,
   TWILIO_ACCOUNT_SID: optionalString,
   TWILIO_AUTH_TOKEN: optionalString,
   TWILIO_FROM_NUMBER: z.preprocess(

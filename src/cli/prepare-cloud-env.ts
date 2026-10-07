@@ -178,6 +178,8 @@ if (checkOnly) {
       local,
       'PHONE_VERIFICATION_WEBHOOK_TOKEN',
     ),
+    PHONE_VERIFICATION_TEST_CODES_JSON:
+      preserved(currentCloud, local, 'PHONE_VERIFICATION_TEST_CODES_JSON') || '{}',
     TWILIO_ACCOUNT_SID: preserved(currentCloud, local, 'TWILIO_ACCOUNT_SID'),
     TWILIO_AUTH_TOKEN: preserved(currentCloud, local, 'TWILIO_AUTH_TOKEN'),
     TWILIO_FROM_NUMBER: preserved(currentCloud, local, 'TWILIO_FROM_NUMBER'),
@@ -237,6 +239,7 @@ if (checkOnly) {
         'TWILIO_FROM_NUMBER',
         'PHONE_VERIFICATION_WEBHOOK_URL',
         'PHONE_VERIFICATION_WEBHOOK_TOKEN',
+        'PHONE_VERIFICATION_TEST_CODES_JSON',
       ],
     ],
     [

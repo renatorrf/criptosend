@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { TwilioVerificationProvider } from '../src/auth/verification-provider.js';
+import {
+  TestNumberVerificationProvider,
+  TwilioVerificationProvider,
+} from '../src/auth/verification-provider.js';
 
 const configuration = {
   accountSid: `AC${'1'.repeat(32)}`,
@@ -49,5 +52,35 @@ describe('TwilioVerificationProvider', () => {
       code: 'PHONE_VERIFICATION_UNAVAILABLE',
       statusCode: 503,
     });
+  });
+});
+
+describe('TestNumberVerificationProvider', () => {
+  it('discloses the configured code without calling the SMS provider', async () => {
+    const delegate = { sendCode: vi.fn().mockResolvedValue(undefined) };
+    const provider = new TestNumberVerificationProvider(delegate, {
+      '+5534999999999': '999999',
+    });
+
+    const code = provider.resolveCode('+5534999999999', '123456');
+    await provider.sendCode('+5534999999999', code);
+
+    expect(code).toBe('999999');
+    expect(provider.disclosedCode('+5534999999999')).toBe('999999');
+    expect(delegate.sendCode).not.toHaveBeenCalled();
+  });
+
+  it('delegates every phone that is not explicitly configured', async () => {
+    const delegate = { sendCode: vi.fn().mockResolvedValue(undefined) };
+    const provider = new TestNumberVerificationProvider(delegate, {
+      '+5534999999999': '999999',
+    });
+
+    const code = provider.resolveCode('+5511999999999', '123456');
+    await provider.sendCode('+5511999999999', code);
+
+    expect(code).toBe('123456');
+    expect(provider.disclosedCode('+5511999999999')).toBeUndefined();
+    expect(delegate.sendCode).toHaveBeenCalledWith('+5511999999999', '123456');
   });
 });

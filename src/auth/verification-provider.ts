@@ -2,6 +2,8 @@ import { env } from '../config/env.js';
 import { AppError } from '../http/app-error.js';
 
 export interface VerificationProvider {
+  resolveCode?(phone: string, generatedCode: string): string;
+  disclosedCode?(phone: string): string | undefined;
   sendCode(phone: string, code: string): Promise<void>;
 }
 
@@ -79,18 +81,46 @@ export class WebhookVerificationProvider implements VerificationProvider {
   }
 }
 
+export class TestNumberVerificationProvider implements VerificationProvider {
+  constructor(
+    private readonly delegate: VerificationProvider,
+    private readonly testCodes: Record<string, string>,
+  ) {}
+
+  resolveCode(phone: string, generatedCode: string): string {
+    return this.testCodes[phone] ?? generatedCode;
+  }
+
+  disclosedCode(phone: string): string | undefined {
+    return this.testCodes[phone];
+  }
+
+  sendCode(phone: string, code: string): Promise<void> {
+    if (this.testCodes[phone]) return Promise.resolve();
+    return this.delegate.sendCode(phone, code);
+  }
+}
+
 export function createVerificationProvider(): VerificationProvider {
+  let provider: VerificationProvider;
   if (
     env.TWILIO_ACCOUNT_SID &&
     env.TWILIO_AUTH_TOKEN &&
     env.TWILIO_FROM_NUMBER
   ) {
-    return new TwilioVerificationProvider({
+    provider = new TwilioVerificationProvider({
       accountSid: env.TWILIO_ACCOUNT_SID,
       authToken: env.TWILIO_AUTH_TOKEN,
       fromNumber: env.TWILIO_FROM_NUMBER,
     });
+  } else {
+    provider = new WebhookVerificationProvider();
   }
 
-  return new WebhookVerificationProvider();
+  return Object.keys(env.PHONE_VERIFICATION_TEST_CODES_JSON).length > 0
+    ? new TestNumberVerificationProvider(
+        provider,
+        env.PHONE_VERIFICATION_TEST_CODES_JSON,
+      )
+    : provider;
 }

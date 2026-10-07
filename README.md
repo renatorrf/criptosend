@@ -16,8 +16,9 @@ Use Node.js 24.15 ou superior. O arquivo `.env` não deve ser commitado.
 - O telefone é normalizado para E.164, cifrado com AES-256-GCM e indexado por HMAC-SHA256.
 - Senhas principais usam Argon2id e nunca são recuperáveis.
 - O access token é curto e o refresh token é opaco, armazenado somente como hash e rotacionado a cada uso.
-- O refresh token é entregue em cookie `HttpOnly`, `SameSite=Strict` e deve usar `Secure` em produção.
+- O refresh token é entregue em cookie `HttpOnly`; em produção usa `Secure`, `SameSite=None` e particionamento para o frontend hospedado separadamente.
 - A verificação telefônica exige `PHONE_VERIFICATION_WEBHOOK_URL`. Sem provedor configurado, a API responde `PHONE_VERIFICATION_UNAVAILABLE` e não simula envio.
+- Números de homologação podem usar códigos fixos definidos somente no ambiente por `PHONE_VERIFICATION_TEST_CODES_JSON`. Apenas os telefones E.164 explicitamente mapeados deixam de chamar o provedor; a senha principal e os limites de tentativa continuam obrigatórios.
 
 ## Limite criptográfico do servidor
 

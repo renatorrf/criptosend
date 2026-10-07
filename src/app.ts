@@ -49,6 +49,7 @@ export async function buildApp(
           '*.pin',
           '*.password',
           '*.code',
+          '*.testCode',
           '*.identityPublicKey',
           '*.publicKey',
           '*.ephemeralPublicKey',
