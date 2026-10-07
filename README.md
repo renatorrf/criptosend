@@ -35,6 +35,7 @@ privado nem conteúdo em texto puro.
 - `POST /auth/register`, `/auth/verify`, `/auth/login`, `/auth/refresh`, `/auth/logout`
 - `POST /auth/access/start`, `/auth/access/verify`, `/auth/access/register`, `/auth/access/login`
 - `POST /auth/username/login`, `/auth/invitations/redeem`
+- `POST /auth/username/recovery/start`, `/auth/username/recovery/complete`
 - `GET|POST /management/invitations`, `DELETE /management/invitations/:id`
 - `GET /management/users`, `PATCH /management/users/:id/status`
 - `PATCH /me/phone`

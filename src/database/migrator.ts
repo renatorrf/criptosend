@@ -122,6 +122,7 @@ export async function verifyTables(): Promise<string[]> {
     'push_subscriptions',
     'security_events',
     'phone_verification_challenges',
+    'username_recovery_challenges',
     'invitation_codes',
     'user_credentials',
     'users',

@@ -69,6 +69,10 @@ const phoneSchema = z
 const changePasswordSchema = z
   .object({ currentPassword: z.string().min(1).max(128), newPassword: password })
   .strict();
+const usernameRecoveryStartSchema = z.object({ username }).strict();
+const usernameRecoveryCompleteSchema = z
+  .object({ recoveryId: uuid, signature: base64, newPassword: password })
+  .strict();
 
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const parsed = schema.safeParse(value);
@@ -144,6 +148,32 @@ export function registerPlatformAccessRoutes(
         reply,
         await service.login(body.username, body.password, mapDevice(body.device), request.id),
       );
+    },
+  );
+
+  app.post(
+    '/auth/username/recovery/start',
+    { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } },
+    async (request, reply) => {
+      const body = parse(usernameRecoveryStartSchema, request.body);
+      return reply
+        .code(202)
+        .send(await service.startPasswordRecovery(body.username, request.id));
+    },
+  );
+
+  app.post(
+    '/auth/username/recovery/complete',
+    { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } },
+    async (request, reply) => {
+      const body = parse(usernameRecoveryCompleteSchema, request.body);
+      await service.completePasswordRecovery(
+        body.recoveryId,
+        decode(body.signature, 64, 144),
+        body.newPassword,
+        request.id,
+      );
+      return reply.code(204).send();
     },
   );
 

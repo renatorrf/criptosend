@@ -19,6 +19,7 @@ import type {
   DeviceInput,
   RecoveryCredentialInput,
 } from './account-access-service.js';
+import { verifyRecoveryProof } from './recovery-proof.js';
 
 const schema = quoteIdentifier(env.SCHEMA);
 
@@ -43,6 +44,16 @@ interface ActorRow {
   id: string;
   role: PlatformRole;
   status: string;
+}
+
+interface UsernameRecoveryRow {
+  user_id: string;
+  key_id: string;
+  public_key: Buffer;
+  wrapped_private_key: Buffer;
+  wrapping_iv: Buffer;
+  kdf_salt: Buffer;
+  kdf_parameters: Record<string, number>;
 }
 
 export function normalizePlatformUsername(value: string): string {
@@ -172,16 +183,175 @@ async function recordEvent(
   requestId: string,
   userId?: string,
   deviceId?: string,
+  outcome: 'SUCCESS' | 'FAILURE' = 'SUCCESS',
 ): Promise<void> {
   await client.query(
     `INSERT INTO ${schema}.security_events
        (id, user_id, device_id, event_type, outcome, request_id)
-     VALUES ($1, $2, $3, $4, 'SUCCESS', $5)`,
-    [randomUUID(), userId ?? null, deviceId ?? null, type, requestId],
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [randomUUID(), userId ?? null, deviceId ?? null, type, outcome, requestId],
   );
 }
 
 export class PlatformAccessService {
+  async startPasswordRecovery(
+    usernameInput: string,
+    requestId: string,
+  ): Promise<{
+    recoveryId: string;
+    recovery: {
+      keyId: string;
+      wrappedPrivateKey: string;
+      wrappingIv: string;
+      kdfSalt: string;
+      kdfParameters: Record<string, number>;
+      challenge: string;
+    };
+  }> {
+    const username = normalizePlatformUsername(usernameInput);
+    const recoveryId = randomUUID();
+    const challenge = randomBytes(32);
+    const result = await databasePool.query<UsernameRecoveryRow>(
+      `SELECT u.id AS user_id, r.key_id, r.public_key, r.wrapped_private_key,
+              r.wrapping_iv, r.kdf_salt, r.kdf_parameters
+       FROM ${schema}.users u
+       JOIN ${schema}.account_recovery_credentials r ON r.user_id = u.id
+       WHERE u.username = $1 AND u.status = 'ACTIVE'`,
+      [username],
+    );
+    const stored = result.rows[0];
+    if (stored) {
+      const client = await beginTransaction();
+      try {
+        await client.query(
+          `INSERT INTO ${schema}.username_recovery_challenges
+             (id, user_id, challenge, expires_at)
+           VALUES ($1, $2, $3, NOW() + INTERVAL '15 minutes')`,
+          [recoveryId, stored.user_id, challenge],
+        );
+        await recordEvent(client, 'USERNAME_RECOVERY_STARTED', requestId, stored.user_id);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+
+    return {
+      recoveryId,
+      recovery: stored
+        ? {
+            keyId: stored.key_id,
+            wrappedPrivateKey: stored.wrapped_private_key.toString('base64'),
+            wrappingIv: stored.wrapping_iv.toString('base64'),
+            kdfSalt: stored.kdf_salt.toString('base64'),
+            kdfParameters: stored.kdf_parameters,
+            challenge: challenge.toString('base64'),
+          }
+        : {
+            keyId: randomUUID(),
+            wrappedPrivateKey: randomBytes(96).toString('base64'),
+            wrappingIv: randomBytes(12).toString('base64'),
+            kdfSalt: randomBytes(16).toString('base64'),
+            kdfParameters: {
+              memorySize: env.ARGON2_MEMORY_COST,
+              iterations: env.ARGON2_TIME_COST,
+              parallelism: env.ARGON2_PARALLELISM,
+              hashLength: 32,
+            },
+            challenge: challenge.toString('base64'),
+          },
+    };
+  }
+
+  async completePasswordRecovery(
+    recoveryId: string,
+    signature: Buffer,
+    newPassword: string,
+    requestId: string,
+  ): Promise<void> {
+    const client = await beginTransaction();
+    let finished = false;
+    try {
+      const result = await client.query<{
+        user_id: string;
+        challenge: Buffer;
+        attempts: number;
+        max_attempts: number;
+        expires_at: Date;
+        consumed_at: Date | null;
+        public_key: Buffer;
+      }>(
+        `SELECT c.user_id, c.challenge, c.attempts, c.max_attempts,
+                c.expires_at, c.consumed_at, r.public_key
+         FROM ${schema}.username_recovery_challenges c
+         JOIN ${schema}.account_recovery_credentials r ON r.user_id = c.user_id
+         JOIN ${schema}.users u ON u.id = c.user_id AND u.status = 'ACTIVE'
+         WHERE c.id = $1 FOR UPDATE OF c`,
+        [recoveryId],
+      );
+      const recovery = result.rows[0];
+      if (
+        !recovery ||
+        recovery.consumed_at ||
+        recovery.expires_at.getTime() <= Date.now() ||
+        recovery.attempts >= recovery.max_attempts
+      ) {
+        throw new AppError(400, 'INVALID_OR_EXPIRED_RECOVERY');
+      }
+      const valid = verifyRecoveryProof(
+        recovery.public_key,
+        recoveryId,
+        recovery.challenge,
+        signature,
+      );
+      if (!valid) {
+        await client.query(
+          `UPDATE ${schema}.username_recovery_challenges
+           SET attempts = attempts + 1 WHERE id = $1`,
+          [recoveryId],
+        );
+        await recordEvent(
+          client,
+          'USERNAME_PASSWORD_RECOVERY',
+          requestId,
+          recovery.user_id,
+          undefined,
+          'FAILURE',
+        );
+        await client.query('COMMIT');
+        finished = true;
+        throw new AppError(401, 'INVALID_RECOVERY_PROOF');
+      }
+      await client.query(
+        `UPDATE ${schema}.user_credentials
+         SET password_hash = $2, failed_attempts = 0, locked_until = NULL
+         WHERE user_id = $1`,
+        [recovery.user_id, await hashPassword(newPassword)],
+      );
+      await client.query(
+        `UPDATE ${schema}.auth_sessions
+         SET revoked_at = COALESCE(revoked_at, NOW()) WHERE user_id = $1`,
+        [recovery.user_id],
+      );
+      await client.query(
+        `UPDATE ${schema}.username_recovery_challenges
+         SET consumed_at = NOW() WHERE id = $1`,
+        [recoveryId],
+      );
+      await recordEvent(client, 'USERNAME_PASSWORD_RECOVERED', requestId, recovery.user_id);
+      await client.query('COMMIT');
+      finished = true;
+    } catch (error) {
+      if (!finished) await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async login(
     usernameInput: string,
     password: string,
