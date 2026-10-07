@@ -55,7 +55,9 @@ interface SessionRow {
 interface UserRow {
   id: string;
   name_encrypted: Buffer;
-  phone_encrypted: Buffer;
+  phone_encrypted: Buffer | null;
+  username: string | null;
+  role: 'PLATFORM_ADMIN' | 'MANAGER' | 'USER';
   discoverable: boolean;
   read_receipts_enabled: boolean;
   typing_indicators_enabled: boolean;
@@ -486,7 +488,7 @@ export class AuthService {
 
   async getMe(userId: string): Promise<Record<string, unknown>> {
     const result = await databasePool.query<UserRow>(
-      `SELECT id, name_encrypted, phone_encrypted, discoverable,
+      `SELECT id, name_encrypted, phone_encrypted, username, role, discoverable,
               read_receipts_enabled, typing_indicators_enabled, created_at
        FROM ${schema}.users
        WHERE id = $1 AND status = 'ACTIVE'`,
@@ -499,7 +501,9 @@ export class AuthService {
     return {
       id: user.id,
       name: decryptField(user.name_encrypted, 'user-name'),
-      phone: decryptField(user.phone_encrypted, 'phone'),
+      phone: user.phone_encrypted ? decryptField(user.phone_encrypted, 'phone') : null,
+      username: user.username,
+      role: user.role,
       discoverable: user.discoverable,
       readReceiptsEnabled: user.read_receipts_enabled,
       typingIndicatorsEnabled: user.typing_indicators_enabled,

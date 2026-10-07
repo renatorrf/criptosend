@@ -15,7 +15,10 @@
     "secrets:prepare": "tsx src/cli/prepare-local-secrets.ts",
     "env:cloud:prepare": "tsx src/cli/prepare-cloud-env.ts",
     "env:cloud:check": "tsx src/cli/prepare-cloud-env.ts --check",
+    "env:remove-legacy-sms": "tsx src/cli/remove-legacy-sms-env.ts",
     "admin:approve-reset": "tsx src/cli/approve-account-reset.ts",
+    "admin:bootstrap": "tsx src/cli/bootstrap-platform-admin.ts",
+    "admin:migrate-phone-user": "tsx src/cli/migrate-phone-user.ts",
     "db:migrate": "tsx src/database/cli.ts migrate",
     "db:rollback": "tsx src/database/cli.ts rollback",
     "db:verify": "tsx src/database/cli.ts verify"

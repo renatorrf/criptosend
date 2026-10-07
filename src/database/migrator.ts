@@ -122,6 +122,7 @@ export async function verifyTables(): Promise<string[]> {
     'push_subscriptions',
     'security_events',
     'phone_verification_challenges',
+    'invitation_codes',
     'user_credentials',
     'users',
     'call_events',
@@ -209,6 +210,25 @@ export async function verifyTables(): Promise<string[]> {
 
   if (identityColumns.rowCount !== 6) {
     throw new Error('The configured schema is missing identity security columns.');
+  }
+
+  const platformAccessColumns = await databasePool.query<{ column_name: string }>(
+    `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = $1
+        AND (
+          (table_name = 'users'
+              AND column_name IN ('username', 'role', 'manager_user_id', 'phone_updated_at'))
+          OR (table_name = 'invitation_codes'
+              AND column_name IN ('code_hash', 'role', 'created_by_user_id', 'used_by_user_id', 'expires_at'))
+        )
+    `,
+    [env.SCHEMA],
+  );
+
+  if (platformAccessColumns.rowCount !== 9) {
+    throw new Error('The configured schema is missing platform access columns.');
   }
 
   const prekeyLifecycle = await databasePool.query<{ column_name: string }>(

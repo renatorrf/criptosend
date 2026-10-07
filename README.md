@@ -13,12 +13,14 @@ Use Node.js 24.15 ou superior. O arquivo `.env` não deve ser commitado.
 
 ## Identidade e sessão
 
-- O telefone é normalizado para E.164, cifrado com AES-256-GCM e indexado por HMAC-SHA256.
+- O acesso principal usa nome de usuário e senha. O telefone é opcional, mutável e serve somente para localizar contatos.
+- Quando informado, o telefone é normalizado para E.164, cifrado com AES-256-GCM e indexado por HMAC-SHA256.
 - Senhas principais usam Argon2id e nunca são recuperáveis.
 - O access token é curto e o refresh token é opaco, armazenado somente como hash e rotacionado a cada uso.
 - O refresh token é entregue em cookie `HttpOnly`; em produção usa `Secure`, `SameSite=None` e particionamento para o frontend hospedado separadamente.
-- A verificação telefônica exige `PHONE_VERIFICATION_WEBHOOK_URL`. Sem provedor configurado, a API responde `PHONE_VERIFICATION_UNAVAILABLE` e não simula envio.
+- A verificação telefônica legada aceita Twilio ou `PHONE_VERIFICATION_WEBHOOK_URL`. Sem provedor, somente essas rotas antigas respondem `PHONE_VERIFICATION_UNAVAILABLE`; o acesso por usuário e convite continua disponível.
 - Números de homologação podem usar códigos fixos definidos somente no ambiente por `PHONE_VERIFICATION_TEST_CODES_JSON`. Apenas os telefones E.164 explicitamente mapeados deixam de chamar o provedor; a senha principal e os limites de tentativa continuam obrigatórios.
+- As rotas de SMS permanecem somente durante a transição das contas legadas e podem ser removidas depois do corte operacional.
 
 ## Limite criptográfico do servidor
 
@@ -32,6 +34,11 @@ privado nem conteúdo em texto puro.
 
 - `POST /auth/register`, `/auth/verify`, `/auth/login`, `/auth/refresh`, `/auth/logout`
 - `POST /auth/access/start`, `/auth/access/verify`, `/auth/access/register`, `/auth/access/login`
+- `POST /auth/username/login`, `/auth/invitations/redeem`
+- `GET|POST /management/invitations`, `DELETE /management/invitations/:id`
+- `GET /management/users`, `PATCH /management/users/:id/status`
+- `PATCH /me/phone`
+- `PATCH /me/password`
 - `POST /auth/recovery/password`, `/auth/recovery/admin-request`, `/auth/recovery/admin-status`, `/auth/recovery/admin-complete`
 - `GET /me`
 - `GET /devices`, `DELETE /devices/:id`
@@ -51,6 +58,26 @@ O Socket.IO aceita somente WebSocket e exige `auth.token` com o mesmo access tok
 Recibos de leitura e indicadores de digitação ficam desativados por padrão e podem ser alterados em `PATCH /me`. Mensagens temporárias aceitam `expiresInSeconds`; um processo interno sobrescreve o ciphertext expirado e registra o evento sem conteúdo.
 
 ## Cadastro e recuperação
+
+O administrador da plataforma é criado uma única vez por operação segura:
+
+```powershell
+npm run admin:bootstrap -- admin "Administrador da plataforma"
+```
+
+O comando imprime a senha inicial somente na criação. O administrador gera
+convites de gestor; cada gestor gera convites de usuário. Convites expiram,
+são de uso único e somente o hash do código fica armazenado. Novos usuários
+definem usuário, senha principal e senha mestra durante a ativação.
+
+O fluxo telefônico abaixo é legado e fica disponível apenas para migração:
+
+```powershell
+npm run admin:migrate-phone-user -- 34999999999 teste.9999
+```
+
+Esse comando preserva a conta, o telefone e o histórico, atribui um usuário e
+imprime uma senha temporária. Sessões antigas são encerradas.
 
 O fluxo unificado recebe nome e telefone, envia um código e somente revela se a
 próxima etapa é entrada ou cadastro depois que o número foi confirmado. Novas

@@ -51,18 +51,8 @@ function serialize(name: string, value: string): string {
 
 function operationalPending(environment: Record<string, string>): string[] {
   const pending: string[] = [];
-  const webhookUrl = environment['PHONE_VERIFICATION_WEBHOOK_URL']?.trim();
-  const twilioNames = [
-    'TWILIO_ACCOUNT_SID',
-    'TWILIO_AUTH_TOKEN',
-    'TWILIO_FROM_NUMBER',
-  ];
-  const hasTwilio = twilioNames.every((name) => environment[name]?.trim());
   const turnUrls = environment['RTC_TURN_URLS']?.trim();
 
-  if (!hasTwilio && (!webhookUrl || !webhookUrl.startsWith('https://'))) {
-    pending.push('TWILIO_* or PHONE_VERIFICATION_WEBHOOK_URL');
-  }
   if (!turnUrls) {
     pending.push('RTC_TURN_URLS');
   }
@@ -168,21 +158,6 @@ if (checkOnly) {
     ARGON2_MEMORY_COST: preserved(currentCloud, local, 'ARGON2_MEMORY_COST') || '19456',
     ARGON2_TIME_COST: preserved(currentCloud, local, 'ARGON2_TIME_COST') || '2',
     ARGON2_PARALLELISM: preserved(currentCloud, local, 'ARGON2_PARALLELISM') || '1',
-    PHONE_VERIFICATION_WEBHOOK_URL: preserved(
-      currentCloud,
-      local,
-      'PHONE_VERIFICATION_WEBHOOK_URL',
-    ),
-    PHONE_VERIFICATION_WEBHOOK_TOKEN: preserved(
-      currentCloud,
-      local,
-      'PHONE_VERIFICATION_WEBHOOK_TOKEN',
-    ),
-    PHONE_VERIFICATION_TEST_CODES_JSON:
-      preserved(currentCloud, local, 'PHONE_VERIFICATION_TEST_CODES_JSON') || '{}',
-    TWILIO_ACCOUNT_SID: preserved(currentCloud, local, 'TWILIO_ACCOUNT_SID'),
-    TWILIO_AUTH_TOKEN: preserved(currentCloud, local, 'TWILIO_AUTH_TOKEN'),
-    TWILIO_FROM_NUMBER: preserved(currentCloud, local, 'TWILIO_FROM_NUMBER'),
     RTC_ICE_SERVERS_JSON: preserved(currentCloud, local, 'RTC_ICE_SERVERS_JSON') || '[]',
     RTC_TURN_URLS: preserved(currentCloud, local, 'RTC_TURN_URLS'),
     RTC_TURN_SHARED_SECRET:
@@ -229,17 +204,6 @@ if (checkOnly) {
         'ARGON2_MEMORY_COST',
         'ARGON2_TIME_COST',
         'ARGON2_PARALLELISM',
-      ],
-    ],
-    [
-      'External SMS provider',
-      [
-        'TWILIO_ACCOUNT_SID',
-        'TWILIO_AUTH_TOKEN',
-        'TWILIO_FROM_NUMBER',
-        'PHONE_VERIFICATION_WEBHOOK_URL',
-        'PHONE_VERIFICATION_WEBHOOK_TOKEN',
-        'PHONE_VERIFICATION_TEST_CODES_JSON',
       ],
     ],
     [

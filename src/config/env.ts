@@ -208,16 +208,6 @@ if (configuredTwilioValues > 0 && configuredTwilioValues < twilioConfiguration.l
   );
 }
 
-if (
-  parsedEnvironment.data.NODE_ENV === 'production' &&
-  configuredTwilioValues === 0 &&
-  !parsedEnvironment.data.PHONE_VERIFICATION_WEBHOOK_URL
-) {
-  throw new Error(
-    'Invalid or missing environment variables: Twilio credentials or PHONE_VERIFICATION_WEBHOOK_URL',
-  );
-}
-
 export const env = {
   ...parsedEnvironment.data,
   APP_ORIGINS: parsedEnvironment.data.APP_ORIGINS.split(',')

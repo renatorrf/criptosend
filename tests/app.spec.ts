@@ -75,12 +75,18 @@ describe('health routes', () => {
     apps.push(app);
 
     const conversations = await app.inject({ method: 'GET', url: '/conversations' });
+    const lookup = await app.inject({
+      method: 'POST',
+      url: '/users/lookup',
+      payload: { phone: '34999999999' },
+    });
     const messages = await app.inject({
       method: 'GET',
       url: '/conversations/1c39cf64-b652-4a5b-82b8-9dfec96b4695/messages',
     });
 
     expect(conversations.statusCode).toBe(401);
+    expect(lookup.statusCode).toBe(401);
     expect(messages.statusCode).toBe(401);
   });
 
@@ -141,5 +147,25 @@ describe('health routes', () => {
 
     expect(registration.statusCode).toBe(401);
     expect(identities.statusCode).toBe(401);
+  });
+
+  it('protects platform management routes with authentication', async () => {
+    const app = await buildApp();
+    apps.push(app);
+
+    const [invitations, users, phone, password] = await Promise.all([
+      app.inject({ method: 'GET', url: '/management/invitations' }),
+      app.inject({ method: 'GET', url: '/management/users' }),
+      app.inject({ method: 'PATCH', url: '/me/phone', payload: { phone: '34999999999' } }),
+      app.inject({
+        method: 'PATCH',
+        url: '/me/password',
+        payload: { currentPassword: 'old-password', newPassword: 'new-password' },
+      }),
+    ]);
+
+    for (const response of [invitations, users, phone, password]) {
+      expect(response.statusCode).toBe(401);
+    }
   });
 });

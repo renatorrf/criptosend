@@ -8,6 +8,7 @@ import Fastify, {
 
 import { registerAuthRoutes } from './auth/auth-routes.js';
 import { registerAccountAccessRoutes } from './auth/account-access-routes.js';
+import { registerPlatformAccessRoutes } from './auth/platform-access-routes.js';
 import {
   createVerificationProvider,
   type VerificationProvider,
@@ -86,6 +87,7 @@ export async function buildApp(
     verificationProvider,
   );
   registerAccountAccessRoutes(app, verificationProvider);
+  registerPlatformAccessRoutes(app, authService);
   registerKeyRoutes(app, authService);
   registerUserRoutes(app, authService);
   const conversations = new ConversationService();

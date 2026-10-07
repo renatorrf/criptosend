@@ -34,10 +34,11 @@ export class UserService {
       `SELECT 1
        FROM ${schema}.users
        WHERE phone_lookup_hash = $1
+         AND id <> $2
          AND discoverable = TRUE
          AND status = 'ACTIVE'
        LIMIT 1`,
-      [createPhoneLookupHash(normalized)],
+      [createPhoneLookupHash(normalized), userId],
     );
     await databasePool.query(
       `INSERT INTO ${schema}.security_events
@@ -48,4 +49,3 @@ export class UserService {
     return result.rowCount === 1;
   }
 }
-
