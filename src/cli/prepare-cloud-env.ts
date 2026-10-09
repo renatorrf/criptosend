@@ -170,12 +170,12 @@ if (checkOnly) {
       preserved(currentCloud, local, 'RTC_TURN_CREDENTIAL_TTL_SECONDS') || '3600',
     RTC_RING_TIMEOUT_SECONDS:
       preserved(currentCloud, local, 'RTC_RING_TIMEOUT_SECONDS') || '45',
-    VAPID_SUBJECT:
-      preserved(currentCloud, local, 'VAPID_SUBJECT') || required(local, 'VAPID_SUBJECT'),
-    VAPID_PUBLIC_KEY:
-      preserved(currentCloud, local, 'VAPID_PUBLIC_KEY') || required(local, 'VAPID_PUBLIC_KEY'),
-    VAPID_PRIVATE_KEY:
-      preserved(currentCloud, local, 'VAPID_PRIVATE_KEY') || required(local, 'VAPID_PRIVATE_KEY'),
+    // The VAPID values form one indivisible credential set. Always copy the
+    // complete local set so a regenerated key pair cannot be mixed with stale
+    // Cloud Run values from a previous deployment.
+    VAPID_SUBJECT: required(local, 'VAPID_SUBJECT'),
+    VAPID_PUBLIC_KEY: required(local, 'VAPID_PUBLIC_KEY'),
+    VAPID_PRIVATE_KEY: required(local, 'VAPID_PRIVATE_KEY'),
   };
 
   const sections: Array<[string, string[]]> = [
