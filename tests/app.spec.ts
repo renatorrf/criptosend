@@ -116,18 +116,24 @@ describe('health routes', () => {
     apps.push(app);
     const messageId = '1c39cf64-b652-4a5b-82b8-9dfec96b4695';
 
-    const [delivered, read, receipts, preferences] = await Promise.all([
+    const [delivered, read, conversationRead, receipts, preferences, pushSubscription] = await Promise.all([
       app.inject({ method: 'POST', url: `/messages/${messageId}/delivered` }),
       app.inject({ method: 'POST', url: `/messages/${messageId}/read` }),
+      app.inject({ method: 'POST', url: `/conversations/${messageId}/read` }),
       app.inject({ method: 'GET', url: `/messages/${messageId}/receipts` }),
       app.inject({
         method: 'PATCH',
         url: '/me',
         payload: { readReceiptsEnabled: true },
       }),
+      app.inject({
+        method: 'POST',
+        url: '/push/subscriptions',
+        payload: {},
+      }),
     ]);
 
-    for (const response of [delivered, read, receipts, preferences]) {
+    for (const response of [delivered, read, conversationRead, receipts, preferences, pushSubscription]) {
       expect(response.statusCode).toBe(401);
     }
   });
@@ -174,9 +180,15 @@ describe('health routes', () => {
     const app = await buildApp();
     apps.push(app);
 
-    const [invitations, users, phone, password] = await Promise.all([
+    const [invitations, users, balance, network, lookup, grant, request, respond, phone, password] = await Promise.all([
       app.inject({ method: 'GET', url: '/management/invitations' }),
       app.inject({ method: 'GET', url: '/management/users' }),
+      app.inject({ method: 'GET', url: '/management/invitation-balance' }),
+      app.inject({ method: 'GET', url: '/management/network' }),
+      app.inject({ method: 'POST', url: '/management/network/lookup', payload: { phone: '34999999999' } }),
+      app.inject({ method: 'POST', url: '/management/managers/1c39cf64-b652-4a5b-82b8-9dfec96b4695/invitation-credits', payload: { amount: 10 } }),
+      app.inject({ method: 'POST', url: '/management/network/requests', payload: { targetManagerId: '1c39cf64-b652-4a5b-82b8-9dfec96b4695' } }),
+      app.inject({ method: 'POST', url: '/management/network/requests/1c39cf64-b652-4a5b-82b8-9dfec96b4695/respond', payload: { decision: 'ACCEPT' } }),
       app.inject({ method: 'PATCH', url: '/me/phone', payload: { phone: '34999999999' } }),
       app.inject({
         method: 'PATCH',
@@ -185,7 +197,7 @@ describe('health routes', () => {
       }),
     ]);
 
-    for (const response of [invitations, users, phone, password]) {
+    for (const response of [invitations, users, balance, network, lookup, grant, request, respond, phone, password]) {
       expect(response.statusCode).toBe(401);
     }
   });

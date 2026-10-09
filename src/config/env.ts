@@ -146,6 +146,9 @@ const environmentSchema = z.object({
     .max(86_400)
     .default(3_600),
   RTC_RING_TIMEOUT_SECONDS: z.coerce.number().int().min(15).max(120).default(45),
+  VAPID_SUBJECT: optionalString,
+  VAPID_PUBLIC_KEY: optionalString,
+  VAPID_PRIVATE_KEY: optionalString,
 });
 
 const parsedEnvironment = environmentSchema.safeParse(process.env);
@@ -205,6 +208,19 @@ const configuredTwilioValues = twilioConfiguration.filter(Boolean).length;
 if (configuredTwilioValues > 0 && configuredTwilioValues < twilioConfiguration.length) {
   throw new Error(
     'Invalid or missing environment variables: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER',
+  );
+}
+
+const vapidConfiguration = [
+  parsedEnvironment.data.VAPID_SUBJECT,
+  parsedEnvironment.data.VAPID_PUBLIC_KEY,
+  parsedEnvironment.data.VAPID_PRIVATE_KEY,
+];
+const configuredVapidValues = vapidConfiguration.filter(Boolean).length;
+
+if (configuredVapidValues > 0 && configuredVapidValues < vapidConfiguration.length) {
+  throw new Error(
+    'Invalid or missing environment variables: VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY',
   );
 }
 

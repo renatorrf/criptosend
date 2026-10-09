@@ -11,7 +11,7 @@ import {
 import type { VerificationProvider } from './verification-provider.js';
 
 const uuid = z.uuid();
-const password = z.string().min(10).max(128);
+const password = z.string().min(8).max(128);
 const base64 = z
   .string()
   .min(16)

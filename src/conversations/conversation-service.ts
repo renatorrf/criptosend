@@ -21,6 +21,7 @@ interface ConversationRow {
   last_message_id: string | null;
   last_message_at: Date | null;
   last_message_deleted_at: Date | null;
+  unread_count: number;
 }
 
 type ConversationSearchMatch = 'NAME' | 'PHONE';
@@ -59,6 +60,7 @@ function mapConversation(
           deleted: row.last_message_deleted_at !== null,
         }
       : null,
+    unreadCount: row.unread_count,
     ...(searchMatch ? { searchMatch } : {}),
   };
 }
@@ -105,9 +107,25 @@ export class ConversationService {
   async createDirect(userId: string, phoneInput: string): Promise<{ id: string }> {
     const phoneHash = createPhoneLookupHash(normalizePhone(phoneInput));
     const targetResult = await databasePool.query<{ id: string }>(
-      `SELECT id FROM ${schema}.users
-       WHERE phone_lookup_hash = $1 AND discoverable = TRUE AND status = 'ACTIVE'`,
-      [phoneHash],
+      `SELECT target.id
+       FROM ${schema}.users target
+       JOIN ${schema}.users actor ON actor.id = $2
+       WHERE target.phone_lookup_hash = $1
+         AND target.discoverable = TRUE
+         AND target.status = 'ACTIVE'
+         AND (
+           actor.role <> 'MANAGER'
+           OR target.manager_user_id = actor.id
+           OR (
+             target.role = 'MANAGER'
+             AND EXISTS (
+               SELECT 1 FROM ${schema}.manager_network_links link
+               WHERE link.manager_low_id = LEAST(actor.id, target.id)
+                 AND link.manager_high_id = GREATEST(actor.id, target.id)
+             )
+           )
+         )`,
+      [phoneHash, userId],
     );
     const targetUserId = targetResult.rows[0]?.id;
     if (!targetUserId || targetUserId === userId) {
@@ -154,7 +172,13 @@ export class ConversationService {
               u.phone_encrypted AS peer_phone_encrypted,
               last_message.id AS last_message_id,
               last_message.created_at AS last_message_at,
-              last_message.deleted_at AS last_message_deleted_at
+              last_message.deleted_at AS last_message_deleted_at,
+              (SELECT COUNT(*)::int
+               FROM ${schema}.message_receipts receipt
+               JOIN ${schema}.messages unread_message ON unread_message.id = receipt.message_id
+               WHERE receipt.user_id = $1 AND receipt.read_at IS NULL
+                 AND unread_message.conversation_id = c.id
+                 AND unread_message.deleted_at IS NULL) AS unread_count
        FROM ${schema}.conversations c
        JOIN ${schema}.conversation_members mine
          ON mine.conversation_id = c.id AND mine.user_id = $1 AND mine.status = 'ACTIVE'
@@ -189,7 +213,13 @@ export class ConversationService {
               u.phone_encrypted AS peer_phone_encrypted,
               last_message.id AS last_message_id,
               last_message.created_at AS last_message_at,
-              last_message.deleted_at AS last_message_deleted_at
+              last_message.deleted_at AS last_message_deleted_at,
+              (SELECT COUNT(*)::int
+               FROM ${schema}.message_receipts receipt
+               JOIN ${schema}.messages unread_message ON unread_message.id = receipt.message_id
+               WHERE receipt.user_id = $1 AND receipt.read_at IS NULL
+                 AND unread_message.conversation_id = c.id
+                 AND unread_message.deleted_at IS NULL) AS unread_count
        FROM ${schema}.conversations c
        JOIN ${schema}.conversation_members mine
          ON mine.conversation_id = c.id AND mine.user_id = $1 AND mine.status = 'ACTIVE'

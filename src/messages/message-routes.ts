@@ -5,6 +5,7 @@ import type { AuthService } from '../auth/auth-service.js';
 import type { ConversationService } from '../conversations/conversation-service.js';
 import { AppError } from '../http/app-error.js';
 import type { RealtimeHub } from '../realtime/realtime-hub.js';
+import type { PushService } from '../push/push-service.js';
 import type { MessageService } from './message-service.js';
 
 const idParamsSchema = z.object({ id: z.uuid() }).strict();
@@ -43,6 +44,7 @@ export function registerMessageRoutes(
   conversations: ConversationService,
   realtime: RealtimeHub,
   service: MessageService,
+  push: PushService,
 ): void {
   app.get('/conversations/:id/messages', async (request) => {
     const auth = await authService.authenticate(request.headers.authorization);
@@ -80,8 +82,35 @@ export function registerMessageRoutes(
     if (result.created) {
       const memberIds = await conversations.listMemberUserIds(params.data.id);
       realtime.emitToUsers(memberIds, 'message:received', result.message);
+      void push.notifyNewMessage(
+        memberIds.filter((userId) => userId !== auth.userId),
+        params.data.id,
+      ).catch(() => {
+        request.log.error('PUSH_NOTIFICATION_FAILED');
+      });
     }
     return reply.code(result.created ? 201 : 200).send(result.message);
+  });
+
+  app.post('/conversations/:id/read', async (request) => {
+    const auth = await authService.authenticate(request.headers.authorization);
+    const params = idParamsSchema.safeParse(request.params);
+    if (!params.success) throw new AppError(400, 'INVALID_REQUEST');
+    const receipts = await service.markConversationRead(
+      auth.userId,
+      auth.deviceId,
+      params.data.id,
+    );
+    for (const receipt of receipts) {
+      if (receipt.shared) {
+        realtime.emitToUsers([receipt.senderUserId], 'message:read', {
+          id: receipt.messageId,
+          conversationId: params.data.id,
+          readAt: receipt.readAt,
+        });
+      }
+    }
+    return { readCount: receipts.length };
   });
 
   app.post('/messages/:id/delivered', async (request) => {

@@ -25,6 +25,8 @@ import { registerMessageRoutes } from './messages/message-routes.js';
 import { MessageExpirationTask } from './messages/message-expiration-task.js';
 import { MessageService } from './messages/message-service.js';
 import { RealtimeHub } from './realtime/realtime-hub.js';
+import { registerPushRoutes } from './push/push-routes.js';
+import { PushService } from './push/push-service.js';
 import { healthRoutes } from './routes/health.js';
 import { registerUserRoutes } from './users/user-routes.js';
 
@@ -95,6 +97,7 @@ export async function buildApp(
   const calls = new CallService(conversations);
   const realtime = new RealtimeHub(app.server, authService, conversations, calls);
   const messages = new MessageService(conversations);
+  const push = new PushService();
   const expirationTask = new MessageExpirationTask(
     messages,
     conversations,
@@ -103,7 +106,8 @@ export async function buildApp(
   );
   const callTimeoutTask = new CallTimeoutTask(calls, realtime, app.log);
   registerConversationRoutes(app, authService, conversations, realtime);
-  registerMessageRoutes(app, authService, conversations, realtime, messages);
+  registerMessageRoutes(app, authService, conversations, realtime, messages, push);
+  registerPushRoutes(app, authService, push);
   registerCallRoutes(app, authService, calls);
   expirationTask.start();
   callTimeoutTask.start();

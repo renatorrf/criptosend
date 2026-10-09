@@ -32,11 +32,24 @@ export class UserService {
     const normalized = normalizePhone(phoneInput);
     const result = await databasePool.query(
       `SELECT 1
-       FROM ${schema}.users
-       WHERE phone_lookup_hash = $1
-         AND id <> $2
-         AND discoverable = TRUE
-         AND status = 'ACTIVE'
+       FROM ${schema}.users target
+       JOIN ${schema}.users actor ON actor.id = $2
+       WHERE target.phone_lookup_hash = $1
+         AND target.id <> $2
+         AND target.discoverable = TRUE
+         AND target.status = 'ACTIVE'
+         AND (
+           actor.role <> 'MANAGER'
+           OR target.manager_user_id = actor.id
+           OR (
+             target.role = 'MANAGER'
+             AND EXISTS (
+               SELECT 1 FROM ${schema}.manager_network_links link
+               WHERE link.manager_low_id = LEAST(actor.id, target.id)
+                 AND link.manager_high_id = GREATEST(actor.id, target.id)
+             )
+           )
+         )
        LIMIT 1`,
       [createPhoneLookupHash(normalized), userId],
     );

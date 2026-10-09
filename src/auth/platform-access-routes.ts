@@ -11,7 +11,7 @@ import type {
 import { PlatformAccessService } from './platform-access-service.js';
 
 const uuid = z.uuid();
-const password = z.string().min(10).max(128);
+const password = z.string().min(8).max(128);
 const username = z.string().trim().min(3).max(40);
 const base64 = z
   .string()
@@ -63,6 +63,12 @@ const invitationSchema = z
   })
   .strict();
 const statusSchema = z.object({ status: z.enum(['ACTIVE', 'SUSPENDED']) }).strict();
+const creditGrantSchema = z.object({ amount: z.number().int().min(1).max(1000) }).strict();
+const managerLookupSchema = z.object({ phone: z.string().trim().min(8).max(30) }).strict();
+const managerNetworkRequestSchema = z.object({ targetManagerId: uuid }).strict();
+const managerNetworkResponseSchema = z
+  .object({ decision: z.enum(['ACCEPT', 'DECLINE']) })
+  .strict();
 const phoneSchema = z
   .object({ phone: z.string().trim().min(8).max(30).nullable() })
   .strict();
@@ -222,6 +228,47 @@ export function registerPlatformAccessRoutes(
   app.get('/management/users', async (request) => {
     const actor = await authService.authenticate(request.headers.authorization);
     return { users: await service.listManagedUsers(actor) };
+  });
+
+  app.get('/management/invitation-balance', async (request) => {
+    const actor = await authService.authenticate(request.headers.authorization);
+    return service.getInvitationBalance(actor);
+  });
+
+  app.post('/management/managers/:id/invitation-credits', async (request, reply) => {
+    const actor = await authService.authenticate(request.headers.authorization);
+    const params = parse(z.object({ id: uuid }).strict(), request.params);
+    const body = parse(creditGrantSchema, request.body);
+    return reply
+      .code(201)
+      .send(await service.grantInvitationCredits(actor, params.id, body.amount, request.id));
+  });
+
+  app.post('/management/network/lookup', async (request) => {
+    const actor = await authService.authenticate(request.headers.authorization);
+    const body = parse(managerLookupSchema, request.body);
+    return service.lookupManager(actor, body.phone);
+  });
+
+  app.post('/management/network/requests', async (request, reply) => {
+    const actor = await authService.authenticate(request.headers.authorization);
+    const body = parse(managerNetworkRequestSchema, request.body);
+    return reply
+      .code(201)
+      .send(await service.createManagerNetworkRequest(actor, body.targetManagerId, request.id));
+  });
+
+  app.get('/management/network', async (request) => {
+    const actor = await authService.authenticate(request.headers.authorization);
+    return service.listManagerNetwork(actor);
+  });
+
+  app.post('/management/network/requests/:id/respond', async (request, reply) => {
+    const actor = await authService.authenticate(request.headers.authorization);
+    const params = parse(z.object({ id: uuid }).strict(), request.params);
+    const body = parse(managerNetworkResponseSchema, request.body);
+    await service.respondManagerNetworkRequest(actor, params.id, body.decision, request.id);
+    return reply.code(204).send();
   });
 
   app.patch('/management/users/:id/status', async (request, reply) => {

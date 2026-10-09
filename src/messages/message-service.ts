@@ -276,9 +276,7 @@ export class MessageService {
        WHERE id = $1 AND status = 'ACTIVE'`,
       [userId],
     );
-    if (!preference.rows[0]?.read_receipts_enabled) {
-      return { shared: false };
-    }
+    const shared = preference.rows[0]?.read_receipts_enabled === true;
     const result = await databasePool.query<{
       sender_user_id: string;
       conversation_id: string;
@@ -299,11 +297,52 @@ export class MessageService {
       throw new AppError(404, 'MESSAGE_NOT_FOUND');
     }
     return {
-      shared: true,
+      shared,
       senderUserId: receipt.sender_user_id,
       conversationId: receipt.conversation_id,
       readAt: receipt.read_at,
     };
+  }
+
+  async markConversationRead(
+    userId: string,
+    deviceId: string,
+    conversationId: string,
+  ): Promise<Array<{
+    messageId: string;
+    senderUserId: string;
+    readAt: Date;
+    shared: boolean;
+  }>> {
+    await this.conversations.assertMember(userId, conversationId);
+    const preference = await databasePool.query<{ read_receipts_enabled: boolean }>(
+      `SELECT read_receipts_enabled FROM ${schema}.users
+       WHERE id = $1 AND status = 'ACTIVE'`,
+      [userId],
+    );
+    const result = await databasePool.query<{
+      message_id: string;
+      sender_user_id: string;
+      read_at: Date;
+    }>(
+      `UPDATE ${schema}.message_receipts r
+       SET delivered_at = COALESCE(r.delivered_at, NOW()),
+           read_at = COALESCE(r.read_at, NOW()),
+           device_id = COALESCE(r.device_id, $2)
+       FROM ${schema}.messages m
+       WHERE r.user_id = $1 AND r.read_at IS NULL
+         AND m.id = r.message_id AND m.conversation_id = $3
+         AND m.sender_user_id <> $1
+       RETURNING r.message_id, m.sender_user_id, r.read_at`,
+      [userId, deviceId, conversationId],
+    );
+    const shared = preference.rows[0]?.read_receipts_enabled === true;
+    return result.rows.map((row) => ({
+      messageId: row.message_id,
+      senderUserId: row.sender_user_id,
+      readAt: row.read_at,
+      shared,
+    }));
   }
 
   async getReceipts(

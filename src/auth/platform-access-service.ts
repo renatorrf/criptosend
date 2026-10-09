@@ -24,6 +24,13 @@ import { verifyRecoveryProof } from './recovery-proof.js';
 const schema = quoteIdentifier(env.SCHEMA);
 
 export type PlatformRole = 'PLATFORM_ADMIN' | 'MANAGER' | 'USER';
+export type ManagerLookupStatus =
+  | 'NOT_FOUND'
+  | 'SELF'
+  | 'LINKED'
+  | 'INCOMING_PENDING'
+  | 'OUTGOING_PENDING'
+  | 'AVAILABLE';
 
 export interface PlatformSession {
   userId: string;
@@ -71,6 +78,10 @@ export function canCreateInvitation(
   return targetRole === 'MANAGER'
     ? actorRole === 'PLATFORM_ADMIN'
     : actorRole === 'PLATFORM_ADMIN' || actorRole === 'MANAGER';
+}
+
+export function managerPair(left: string, right: string): [string, string] {
+  return left < right ? [left, right] : [right, left];
 }
 
 async function beginTransaction(): Promise<PoolClient> {
@@ -475,6 +486,26 @@ export class PlatformAccessService {
             : null,
         ],
       );
+      if (invite.role === 'MANAGER') {
+        await client.query(
+          `INSERT INTO ${schema}.manager_invitation_balances (manager_user_id)
+           VALUES ($1)
+           ON CONFLICT (manager_user_id) DO NOTHING`,
+          [userId],
+        );
+      } else if (invite.creator_role === 'MANAGER') {
+        const balance = await client.query(
+          `UPDATE ${schema}.manager_invitation_balances
+           SET available_credits = available_credits - 1,
+               consumed_credits = consumed_credits + 1
+           WHERE manager_user_id = $1 AND available_credits > 0
+           RETURNING manager_user_id`,
+          [invite.created_by_user_id],
+        );
+        if (balance.rowCount !== 1) {
+          throw new AppError(409, 'INVITATION_QUOTA_EXHAUSTED');
+        }
+      }
       await client.query(
         `INSERT INTO ${schema}.user_credentials (user_id, password_hash)
          VALUES ($1, $2)`,
@@ -522,6 +553,30 @@ export class PlatformAccessService {
     const expiresAt = new Date(Date.now() + expiresInHours * 60 * 60 * 1_000);
     const client = await beginTransaction();
     try {
+      if (actorRow.role === 'MANAGER' && role === 'USER') {
+        const balance = await client.query<{ available_credits: number }>(
+          `SELECT available_credits
+           FROM ${schema}.manager_invitation_balances
+           WHERE manager_user_id = $1
+           FOR UPDATE`,
+          [actor.userId],
+        );
+        const activeInvitations = await client.query<{ count: string }>(
+          `SELECT COUNT(*)::TEXT AS count
+           FROM ${schema}.invitation_codes
+           WHERE created_by_user_id = $1
+             AND role = 'USER'
+             AND used_at IS NULL
+             AND revoked_at IS NULL
+             AND expires_at > NOW()`,
+          [actor.userId],
+        );
+        const available = balance.rows[0]?.available_credits ?? 0;
+        const reserved = Number(activeInvitations.rows[0]?.count ?? 0);
+        if (reserved >= available) {
+          throw new AppError(409, 'INVITATION_QUOTA_EXHAUSTED');
+        }
+      }
       await client.query(
         `INSERT INTO ${schema}.invitation_codes
            (id, code_hash, role, created_by_user_id, expires_at)
@@ -592,12 +647,32 @@ export class PlatformAccessService {
       status: string;
       phone_encrypted: Buffer | null;
       created_at: Date;
+      available_credits: number | null;
+      consumed_credits: number | null;
+      active_invitations: number | null;
     }>(
       actorRow.role === 'PLATFORM_ADMIN'
-        ? `SELECT id, username, name_encrypted, role, status, phone_encrypted, created_at
-           FROM ${schema}.users WHERE role = 'MANAGER' ORDER BY created_at DESC`
-        : `SELECT id, username, name_encrypted, role, status, phone_encrypted, created_at
-           FROM ${schema}.users WHERE manager_user_id = $1 ORDER BY created_at DESC`,
+        ? `SELECT u.id, u.username, u.name_encrypted, u.role, u.status,
+                  u.phone_encrypted, u.created_at,
+                  COALESCE(b.available_credits, 0) AS available_credits,
+                  COALESCE(b.consumed_credits, 0) AS consumed_credits,
+                  (SELECT COUNT(*)::INTEGER
+                   FROM ${schema}.invitation_codes i
+                   WHERE i.created_by_user_id = u.id
+                     AND i.role = 'USER'
+                     AND i.used_at IS NULL
+                     AND i.revoked_at IS NULL
+                     AND i.expires_at > NOW()) AS active_invitations
+           FROM ${schema}.users u
+           LEFT JOIN ${schema}.manager_invitation_balances b ON b.manager_user_id = u.id
+           WHERE u.role = 'MANAGER' ORDER BY u.created_at DESC`
+        : `SELECT u.id, u.username, u.name_encrypted, u.role, u.status,
+                  u.phone_encrypted, u.created_at,
+                  NULL::INTEGER AS available_credits,
+                  NULL::INTEGER AS consumed_credits,
+                  NULL::INTEGER AS active_invitations
+           FROM ${schema}.users u
+           WHERE u.manager_user_id = $1 ORDER BY u.created_at DESC`,
       actorRow.role === 'PLATFORM_ADMIN' ? [] : [actor.userId],
     );
     return result.rows.map((user) => ({
@@ -608,7 +683,362 @@ export class PlatformAccessService {
       status: user.status,
       hasPhone: user.phone_encrypted !== null,
       createdAt: user.created_at,
+      ...(user.available_credits !== null
+        ? {
+            availableCredits: user.available_credits,
+            consumedCredits: user.consumed_credits ?? 0,
+            activeInvitations: user.active_invitations ?? 0,
+          }
+        : {}),
     }));
+  }
+
+  async getInvitationBalance(actor: AuthContext): Promise<{
+    availableCredits: number;
+    consumedCredits: number;
+    activeInvitations: number;
+  }> {
+    const actorRow = await this.actor(actor.userId);
+    if (actorRow.role !== 'MANAGER') throw new AppError(403, 'FORBIDDEN');
+    const result = await databasePool.query<{
+      available_credits: number;
+      consumed_credits: number;
+      active_invitations: number;
+    }>(
+      `SELECT b.available_credits, b.consumed_credits,
+              COUNT(i.id)::INTEGER AS active_invitations
+       FROM ${schema}.manager_invitation_balances b
+       LEFT JOIN ${schema}.invitation_codes i
+         ON i.created_by_user_id = b.manager_user_id
+        AND i.role = 'USER'
+        AND i.used_at IS NULL
+        AND i.revoked_at IS NULL
+        AND i.expires_at > NOW()
+       WHERE b.manager_user_id = $1
+       GROUP BY b.available_credits, b.consumed_credits`,
+      [actor.userId],
+    );
+    const balance = result.rows[0];
+    if (!balance) throw new AppError(404, 'INVITATION_BALANCE_NOT_FOUND');
+    return {
+      availableCredits: balance.available_credits,
+      consumedCredits: balance.consumed_credits,
+      activeInvitations: balance.active_invitations,
+    };
+  }
+
+  async grantInvitationCredits(
+    actor: AuthContext,
+    managerUserId: string,
+    amount: number,
+    requestId: string,
+  ): Promise<{ availableCredits: number; consumedCredits: number }> {
+    const actorRow = await this.actor(actor.userId);
+    if (actorRow.role !== 'PLATFORM_ADMIN') throw new AppError(403, 'FORBIDDEN');
+    const client = await beginTransaction();
+    try {
+      const manager = await client.query(
+        `SELECT 1 FROM ${schema}.users
+         WHERE id = $1 AND role = 'MANAGER'`,
+        [managerUserId],
+      );
+      if (manager.rowCount !== 1) throw new AppError(404, 'MANAGER_NOT_FOUND');
+      const grantId = randomUUID();
+      await client.query(
+        `INSERT INTO ${schema}.manager_invitation_grants
+           (id, manager_user_id, granted_by_user_id, amount)
+         VALUES ($1, $2, $3, $4)`,
+        [grantId, managerUserId, actor.userId, amount],
+      );
+      const result = await client.query<{
+        available_credits: number;
+        consumed_credits: number;
+      }>(
+        `INSERT INTO ${schema}.manager_invitation_balances
+           (manager_user_id, available_credits)
+         VALUES ($1, $2)
+         ON CONFLICT (manager_user_id) DO UPDATE
+           SET available_credits = manager_invitation_balances.available_credits + EXCLUDED.available_credits
+         RETURNING available_credits, consumed_credits`,
+        [managerUserId, amount],
+      );
+      await recordEvent(
+        client,
+        'MANAGER_INVITATION_CREDITS_GRANTED',
+        requestId,
+        actor.userId,
+        actor.deviceId,
+      );
+      const balance = result.rows[0];
+      if (!balance) throw new Error('Invitation balance was not returned after grant.');
+      await client.query('COMMIT');
+      return {
+        availableCredits: balance.available_credits,
+        consumedCredits: balance.consumed_credits,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async lookupManager(
+    actor: AuthContext,
+    phoneInput: string,
+  ): Promise<{
+    status: ManagerLookupStatus;
+    manager?: { id: string; name: string; username: string };
+  }> {
+    const actorRow = await this.actor(actor.userId);
+    if (actorRow.role !== 'MANAGER') throw new AppError(403, 'FORBIDDEN');
+    const phone = normalizePhone(phoneInput);
+    const managerResult = await databasePool.query<{
+      id: string;
+      name_encrypted: Buffer;
+      username: string;
+    }>(
+      `SELECT id, name_encrypted, username
+       FROM ${schema}.users
+       WHERE phone_lookup_hash = $1
+         AND role = 'MANAGER'
+         AND status = 'ACTIVE'
+         AND discoverable = TRUE`,
+      [createPhoneLookupHash(phone)],
+    );
+    const manager = managerResult.rows[0];
+    if (!manager) return { status: 'NOT_FOUND' };
+    const summary = {
+      id: manager.id,
+      name: decryptField(manager.name_encrypted, 'user-name'),
+      username: manager.username,
+    };
+    if (manager.id === actor.userId) return { status: 'SELF', manager: summary };
+
+    const [lowId, highId] = managerPair(actor.userId, manager.id);
+    const linked = await databasePool.query(
+      `SELECT 1 FROM ${schema}.manager_network_links
+       WHERE manager_low_id = $1 AND manager_high_id = $2`,
+      [lowId, highId],
+    );
+    if (linked.rowCount === 1) return { status: 'LINKED', manager: summary };
+
+    const pending = await databasePool.query<{
+      requester_manager_id: string;
+    }>(
+      `SELECT requester_manager_id
+       FROM ${schema}.manager_network_requests
+       WHERE LEAST(requester_manager_id, target_manager_id) = $1
+         AND GREATEST(requester_manager_id, target_manager_id) = $2
+         AND status = 'PENDING'
+         AND expires_at > NOW()
+       LIMIT 1`,
+      [lowId, highId],
+    );
+    if (pending.rows[0]) {
+      return {
+        status:
+          pending.rows[0].requester_manager_id === actor.userId
+            ? 'OUTGOING_PENDING'
+            : 'INCOMING_PENDING',
+        manager: summary,
+      };
+    }
+    return { status: 'AVAILABLE', manager: summary };
+  }
+
+  async createManagerNetworkRequest(
+    actor: AuthContext,
+    targetManagerId: string,
+    requestId: string,
+  ): Promise<{ id: string; expiresAt: Date }> {
+    const actorRow = await this.actor(actor.userId);
+    if (actorRow.role !== 'MANAGER' || targetManagerId === actor.userId) {
+      throw new AppError(403, 'FORBIDDEN');
+    }
+    const [lowId, highId] = managerPair(actor.userId, targetManagerId);
+    const client = await beginTransaction();
+    try {
+      const target = await client.query(
+        `SELECT 1 FROM ${schema}.users
+         WHERE id = $1 AND role = 'MANAGER' AND status = 'ACTIVE'`,
+        [targetManagerId],
+      );
+      if (target.rowCount !== 1) throw new AppError(404, 'MANAGER_NOT_FOUND');
+      const linked = await client.query(
+        `SELECT 1 FROM ${schema}.manager_network_links
+         WHERE manager_low_id = $1 AND manager_high_id = $2`,
+        [lowId, highId],
+      );
+      if (linked.rowCount === 1) throw new AppError(409, 'MANAGERS_ALREADY_LINKED');
+      await client.query(
+        `UPDATE ${schema}.manager_network_requests
+         SET status = 'CANCELLED', responded_at = NOW()
+         WHERE LEAST(requester_manager_id, target_manager_id) = $1
+           AND GREATEST(requester_manager_id, target_manager_id) = $2
+           AND status = 'PENDING'
+           AND expires_at <= NOW()`,
+        [lowId, highId],
+      );
+      const id = randomUUID();
+      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000);
+      await client.query(
+        `INSERT INTO ${schema}.manager_network_requests
+           (id, requester_manager_id, target_manager_id, expires_at)
+         VALUES ($1, $2, $3, $4)`,
+        [id, actor.userId, targetManagerId, expiresAt],
+      );
+      await recordEvent(client, 'MANAGER_NETWORK_REQUESTED', requestId, actor.userId, actor.deviceId);
+      await client.query('COMMIT');
+      return { id, expiresAt };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        error.code === '23505'
+      ) {
+        throw new AppError(409, 'NETWORK_REQUEST_ALREADY_EXISTS');
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listManagerNetwork(actor: AuthContext): Promise<{
+    links: Array<Record<string, unknown>>;
+    requests: Array<Record<string, unknown>>;
+  }> {
+    const actorRow = await this.actor(actor.userId);
+    if (actorRow.role !== 'MANAGER') throw new AppError(403, 'FORBIDDEN');
+    const links = await databasePool.query<{
+      id: string;
+      name_encrypted: Buffer;
+      username: string;
+      created_at: Date;
+    }>(
+      `SELECT u.id, u.name_encrypted, u.username, l.created_at
+       FROM ${schema}.manager_network_links l
+       JOIN ${schema}.users u
+         ON u.id = CASE
+           WHEN l.manager_low_id = $1 THEN l.manager_high_id
+           ELSE l.manager_low_id
+         END
+       WHERE l.manager_low_id = $1 OR l.manager_high_id = $1
+       ORDER BY l.created_at DESC`,
+      [actor.userId],
+    );
+    const requests = await databasePool.query<{
+      id: string;
+      requester_manager_id: string;
+      target_manager_id: string;
+      manager_id: string;
+      name_encrypted: Buffer;
+      username: string;
+      created_at: Date;
+      expires_at: Date;
+    }>(
+      `SELECT r.id, r.requester_manager_id, r.target_manager_id,
+              u.id AS manager_id, u.name_encrypted, u.username,
+              r.created_at, r.expires_at
+       FROM ${schema}.manager_network_requests r
+       JOIN ${schema}.users u
+         ON u.id = CASE
+           WHEN r.requester_manager_id = $1 THEN r.target_manager_id
+           ELSE r.requester_manager_id
+         END
+       WHERE (r.requester_manager_id = $1 OR r.target_manager_id = $1)
+         AND r.status = 'PENDING'
+         AND r.expires_at > NOW()
+       ORDER BY r.created_at DESC`,
+      [actor.userId],
+    );
+    return {
+      links: links.rows.map((link) => ({
+        id: link.id,
+        name: decryptField(link.name_encrypted, 'user-name'),
+        username: link.username,
+        createdAt: link.created_at,
+      })),
+      requests: requests.rows.map((request) => ({
+        id: request.id,
+        direction:
+          request.requester_manager_id === actor.userId ? 'OUTGOING' : 'INCOMING',
+        manager: {
+          id: request.manager_id,
+          name: decryptField(request.name_encrypted, 'user-name'),
+          username: request.username,
+        },
+        createdAt: request.created_at,
+        expiresAt: request.expires_at,
+      })),
+    };
+  }
+
+  async respondManagerNetworkRequest(
+    actor: AuthContext,
+    networkRequestId: string,
+    decision: 'ACCEPT' | 'DECLINE',
+    requestId: string,
+  ): Promise<void> {
+    const actorRow = await this.actor(actor.userId);
+    if (actorRow.role !== 'MANAGER') throw new AppError(403, 'FORBIDDEN');
+    const client = await beginTransaction();
+    try {
+      const result = await client.query<{
+        requester_manager_id: string;
+        target_manager_id: string;
+        expires_at: Date;
+      }>(
+        `SELECT requester_manager_id, target_manager_id, expires_at
+         FROM ${schema}.manager_network_requests
+         WHERE id = $1 AND target_manager_id = $2 AND status = 'PENDING'
+         FOR UPDATE`,
+        [networkRequestId, actor.userId],
+      );
+      const networkRequest = result.rows[0];
+      if (!networkRequest || networkRequest.expires_at.getTime() <= Date.now()) {
+        throw new AppError(404, 'NETWORK_REQUEST_NOT_FOUND');
+      }
+      const status = decision === 'ACCEPT' ? 'ACCEPTED' : 'DECLINED';
+      if (decision === 'ACCEPT') {
+        const [lowId, highId] = managerPair(
+          networkRequest.requester_manager_id,
+          networkRequest.target_manager_id,
+        );
+        await client.query(
+          `INSERT INTO ${schema}.manager_network_links
+             (manager_low_id, manager_high_id, created_by_user_id)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (manager_low_id, manager_high_id) DO NOTHING`,
+          [lowId, highId, actor.userId],
+        );
+      }
+      await client.query(
+        `UPDATE ${schema}.manager_network_requests
+         SET status = $2, responded_at = NOW()
+         WHERE id = $1`,
+        [networkRequestId, status],
+      );
+      await recordEvent(
+        client,
+        decision === 'ACCEPT'
+          ? 'MANAGER_NETWORK_REQUEST_ACCEPTED'
+          : 'MANAGER_NETWORK_REQUEST_DECLINED',
+        requestId,
+        actor.userId,
+        actor.deviceId,
+      );
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async setManagedUserStatus(

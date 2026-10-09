@@ -35,12 +35,14 @@
     "libphonenumber-js": "^1.13.14",
     "pg": "^8.23.1",
     "socket.io": "^4.8.4",
+    "web-push": "^3.6.7",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.6.4",
     "@types/pg": "^8.23.1",
+    "@types/web-push": "^3.6.4",
     "eslint": "^10.12.0",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
