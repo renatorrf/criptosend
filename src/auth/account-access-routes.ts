@@ -143,6 +143,7 @@ export function registerAccountAccessRoutes(
     reply.setCookie(env.AUTH_COOKIE_NAME, session.refreshToken, cookieOptions);
     return reply.send({
       accessToken: session.accessToken,
+      refreshToken: session.refreshToken,
       tokenType: 'Bearer',
       expiresInSeconds: session.accessExpiresInSeconds,
       userId: session.userId,

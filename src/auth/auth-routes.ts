@@ -66,13 +66,23 @@ function assertTrustedOrigin(request: FastifyRequest): void {
 
 function sessionResponse(tokens: {
   accessToken: string;
+  refreshToken: string;
   accessExpiresInSeconds: number;
 }): Record<string, unknown> {
   return {
     accessToken: tokens.accessToken,
+    refreshToken: tokens.refreshToken,
     tokenType: 'Bearer',
     expiresInSeconds: tokens.accessExpiresInSeconds,
   };
+}
+
+function requestRefreshToken(request: FastifyRequest): string | undefined {
+  const authorization = request.headers.authorization;
+  if (authorization?.startsWith('Bearer ')) {
+    return authorization.slice(7);
+  }
+  return request.cookies[env.AUTH_COOKIE_NAME];
 }
 
 export async function registerAuthRoutes(
@@ -146,7 +156,7 @@ export async function registerAuthRoutes(
     { config: { rateLimit: { max: 30, timeWindow: '15 minutes' } } },
     async (request, reply) => {
       assertTrustedOrigin(request);
-      const refreshToken = request.cookies[env.AUTH_COOKIE_NAME];
+      const refreshToken = requestRefreshToken(request);
       if (!refreshToken) {
         throw new AppError(401, 'INVALID_REFRESH_TOKEN');
       }
@@ -158,7 +168,7 @@ export async function registerAuthRoutes(
 
   app.post('/auth/logout', async (request, reply) => {
     assertTrustedOrigin(request);
-    await service.logout(request.cookies[env.AUTH_COOKIE_NAME]);
+    await service.logout(requestRefreshToken(request));
     reply.clearCookie(env.AUTH_COOKIE_NAME, cookieOptions);
     return reply.code(204).send();
   });

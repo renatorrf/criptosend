@@ -17,10 +17,13 @@ interface ConversationRow {
   created_at: Date;
   peer_user_id: string;
   peer_name_encrypted: Buffer;
+  peer_phone_encrypted: Buffer | null;
   last_message_id: string | null;
   last_message_at: Date | null;
   last_message_deleted_at: Date | null;
 }
+
+type ConversationSearchMatch = 'NAME' | 'PHONE';
 
 async function beginTransaction(): Promise<PoolClient> {
   const client = await databasePool.connect();
@@ -37,7 +40,10 @@ export function createDirectConversationKey(
     .digest('hex');
 }
 
-function mapConversation(row: ConversationRow): Record<string, unknown> {
+function mapConversation(
+  row: ConversationRow,
+  searchMatch?: ConversationSearchMatch,
+): Record<string, unknown> {
   return {
     id: row.id,
     type: 'DIRECT',
@@ -53,7 +59,31 @@ function mapConversation(row: ConversationRow): Record<string, unknown> {
           deleted: row.last_message_deleted_at !== null,
         }
       : null,
+    ...(searchMatch ? { searchMatch } : {}),
   };
+}
+
+function normalizeNameSearch(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase('pt-BR');
+}
+
+function conversationSearchMatch(
+  row: ConversationRow,
+  search: string,
+): ConversationSearchMatch | null {
+  const normalizedSearch = normalizeNameSearch(search.trim());
+  if (!normalizedSearch) return null;
+
+  const peerName = normalizeNameSearch(decryptField(row.peer_name_encrypted, 'user-name'));
+  if (peerName.includes(normalizedSearch)) return 'NAME';
+
+  const searchedDigits = search.replace(/\D/g, '');
+  if (!searchedDigits || !row.peer_phone_encrypted) return null;
+  const peerDigits = decryptField(row.peer_phone_encrypted, 'phone').replace(/\D/g, '');
+  return peerDigits.includes(searchedDigits) ? 'PHONE' : null;
 }
 
 export class ConversationService {
@@ -116,11 +146,12 @@ export class ConversationService {
     }
   }
 
-  async list(userId: string): Promise<Record<string, unknown>[]> {
+  async list(userId: string, search?: string): Promise<Record<string, unknown>[]> {
     const result = await databasePool.query<ConversationRow>(
       `SELECT c.id, c.created_at,
               peer.user_id AS peer_user_id,
               u.name_encrypted AS peer_name_encrypted,
+              u.phone_encrypted AS peer_phone_encrypted,
               last_message.id AS last_message_id,
               last_message.created_at AS last_message_at,
               last_message.deleted_at AS last_message_deleted_at
@@ -141,7 +172,13 @@ export class ConversationService {
        ORDER BY COALESCE(last_message.created_at, c.created_at) DESC`,
       [userId],
     );
-    return result.rows.map(mapConversation);
+    const normalizedSearch = search?.trim();
+    if (!normalizedSearch) return result.rows.map((row) => mapConversation(row));
+
+    return result.rows.flatMap((row) => {
+      const match = conversationSearchMatch(row, normalizedSearch);
+      return match ? [mapConversation(row, match)] : [];
+    });
   }
 
   async get(userId: string, conversationId: string): Promise<Record<string, unknown>> {
@@ -149,6 +186,7 @@ export class ConversationService {
       `SELECT c.id, c.created_at,
               peer.user_id AS peer_user_id,
               u.name_encrypted AS peer_name_encrypted,
+              u.phone_encrypted AS peer_phone_encrypted,
               last_message.id AS last_message_id,
               last_message.created_at AS last_message_at,
               last_message.deleted_at AS last_message_deleted_at

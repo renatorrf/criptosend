@@ -8,6 +8,7 @@ import { ConversationService } from './conversation-service.js';
 
 const idParamsSchema = z.object({ id: z.uuid() }).strict();
 const directSchema = z.object({ phone: z.string().trim().min(8).max(30) }).strict();
+const listQuerySchema = z.object({ search: z.string().trim().max(80).optional() }).strict();
 
 export function registerConversationRoutes(
   app: FastifyInstance,
@@ -17,7 +18,13 @@ export function registerConversationRoutes(
 ): void {
   app.get('/conversations', async (request) => {
     const auth = await authService.authenticate(request.headers.authorization);
-    return { conversations: await conversations.list(auth.userId) };
+    const parsed = listQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      throw new AppError(400, 'INVALID_REQUEST');
+    }
+    return {
+      conversations: await conversations.list(auth.userId, parsed.data.search),
+    };
   });
 
   app.post('/conversations/direct', async (request, reply) => {
@@ -41,4 +48,3 @@ export function registerConversationRoutes(
     return conversations.get(auth.userId, parsed.data.id);
   });
 }
-
