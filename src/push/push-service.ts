@@ -21,6 +21,21 @@ interface SubscriptionRow {
   auth_encrypted: Buffer;
 }
 
+export interface PushStatus {
+  configured: boolean;
+  publicKey: string | null;
+  activeDevices: number;
+}
+
+export interface PushSubscriptionStatus {
+  synchronized: boolean;
+}
+
+export interface PushDeliverySummary {
+  attempted: number;
+  delivered: number;
+}
+
 export interface RegisterPushSubscriptionInput {
   endpoint: string;
   expirationTime: number | null;
@@ -72,6 +87,35 @@ export class PushService {
     );
   }
 
+  async status(userId: string): Promise<PushStatus> {
+    const result = await databasePool.query<{ active_devices: string }>(
+      `SELECT COUNT(DISTINCT device_id)::text AS active_devices
+       FROM ${schema}.push_subscriptions
+       WHERE user_id = $1 AND revoked_at IS NULL`,
+      [userId],
+    );
+    return {
+      configured: this.configured,
+      publicKey: this.configured ? env.VAPID_PUBLIC_KEY ?? null : null,
+      activeDevices: Number(result.rows[0]?.active_devices ?? 0),
+    };
+  }
+
+  async subscriptionStatus(
+    userId: string,
+    deviceId: string,
+    endpoint: string,
+  ): Promise<PushSubscriptionStatus> {
+    const result = await databasePool.query(
+      `SELECT 1
+       FROM ${schema}.push_subscriptions
+       WHERE user_id = $1 AND device_id = $2
+         AND endpoint_lookup_hash = $3 AND revoked_at IS NULL`,
+      [userId, deviceId, endpointHash(endpoint)],
+    );
+    return { synchronized: result.rowCount === 1 };
+  }
+
   async revoke(userId: string, deviceId: string, endpoint: string): Promise<void> {
     await databasePool.query(
       `UPDATE ${schema}.push_subscriptions
@@ -89,8 +133,8 @@ export class PushService {
       notification: {
         title: 'Spotifi',
         body: 'Você recebeu uma nova mensagem.',
-        icon: '/assets/icon/icon-192x192.png',
-        badge: '/assets/icon/icon-96x96.png',
+        icon: pushOpenUrl('/assets/icon/icon-192x192.png'),
+        badge: pushOpenUrl('/assets/icon/icon-96x96.png'),
         tag: `conversation-${conversationId}`,
         renotify: true,
         data: {
@@ -102,7 +146,7 @@ export class PushService {
           },
         },
       },
-    }, 120);
+    }, 300, `conversation-${conversationId}`);
   }
 
   async notifyIncomingCall(
@@ -114,8 +158,8 @@ export class PushService {
       notification: {
         title: 'Chamada de vídeo',
         body: 'Você está recebendo uma chamada no Spotifi.',
-        icon: '/assets/icon/icon-192x192.png',
-        badge: '/assets/icon/icon-96x96.png',
+        icon: pushOpenUrl('/assets/icon/icon-192x192.png'),
+        badge: pushOpenUrl('/assets/icon/icon-96x96.png'),
         tag: `call-${callId}`,
         renotify: true,
         requireInteraction: true,
@@ -130,15 +174,40 @@ export class PushService {
           },
         },
       },
-    }, 60);
+    }, 300, `call-${callId}`);
+  }
+
+  async notifyTest(userId: string): Promise<PushDeliverySummary> {
+    return this.notifyUsers([userId], {
+      notification: {
+        title: 'Spotifi',
+        body: 'As notificações estão funcionando neste dispositivo.',
+        icon: pushOpenUrl('/assets/icon/icon-192x192.png'),
+        badge: pushOpenUrl('/assets/icon/icon-96x96.png'),
+        tag: `push-test-${userId}`,
+        renotify: false,
+        data: {
+          onActionClick: {
+            default: {
+              operation: 'navigateLastFocusedOrOpen',
+              url: pushOpenUrl(),
+            },
+          },
+        },
+      },
+    }, 300, `push-test-${userId}`);
   }
 
   private async notifyUsers(
     recipientUserIds: string[],
     body: Record<string, unknown>,
     ttl: number,
-  ): Promise<void> {
-    if (!this.configured || recipientUserIds.length === 0) return;
+    notificationKey: string,
+  ): Promise<PushDeliverySummary> {
+    const { VAPID_SUBJECT: subject, VAPID_PUBLIC_KEY: publicKey, VAPID_PRIVATE_KEY: privateKey } = env;
+    if (!subject || !publicKey || !privateKey || recipientUserIds.length === 0) {
+      return { attempted: 0, delivered: 0 };
+    }
 
     const result = await databasePool.query<SubscriptionRow>(
       `SELECT id, endpoint_encrypted, p256dh_encrypted, auth_encrypted
@@ -147,8 +216,12 @@ export class PushService {
       [recipientUserIds],
     );
     const payload = JSON.stringify(body);
+    const topic = createHash('sha256')
+      .update(notificationKey, 'utf8')
+      .digest('base64url')
+      .slice(0, 32);
 
-    await Promise.allSettled(
+    const outcomes = await Promise.all(
       result.rows.map(async (row) => {
         const subscription: PushSubscription = {
           endpoint: decryptField(row.endpoint_encrypted, 'push-endpoint'),
@@ -158,7 +231,17 @@ export class PushService {
           },
         };
         try {
-          await webpush.sendNotification(subscription, payload, { TTL: ttl });
+          await webpush.sendNotification(subscription, payload, {
+            vapidDetails: {
+              subject,
+              publicKey,
+              privateKey,
+            },
+            TTL: ttl,
+            urgency: 'high',
+            topic,
+          });
+          return true;
         } catch (error) {
           const statusCode = (error as { statusCode?: number }).statusCode;
           if (statusCode === 404 || statusCode === 410) {
@@ -166,11 +249,15 @@ export class PushService {
               `UPDATE ${schema}.push_subscriptions SET revoked_at = NOW() WHERE id = $1`,
               [row.id],
             );
-            return;
+            return false;
           }
           throw error;
         }
       }),
     );
+    return {
+      attempted: result.rows.length,
+      delivered: outcomes.filter(Boolean).length,
+    };
   }
 }

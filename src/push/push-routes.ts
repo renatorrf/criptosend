@@ -21,6 +21,11 @@ export function registerPushRoutes(
   authService: AuthService,
   push: PushService,
 ): void {
+  app.get('/push/status', async (request) => {
+    const auth = await authService.authenticate(request.headers.authorization);
+    return push.status(auth.userId);
+  });
+
   app.post('/push/subscriptions', async (request, reply) => {
     const auth = await authService.authenticate(request.headers.authorization);
     const parsed = subscriptionSchema.safeParse(request.body);
@@ -29,6 +34,26 @@ export function registerPushRoutes(
     }
     await push.register(auth.userId, auth.deviceId, parsed.data);
     return reply.code(204).send();
+  });
+
+  app.post('/push/subscriptions/status', async (request) => {
+    const auth = await authService.authenticate(request.headers.authorization);
+    const parsed = revokeSchema.safeParse(request.body);
+    if (!parsed.success) throw new AppError(400, 'INVALID_REQUEST');
+    return push.subscriptionStatus(auth.userId, auth.deviceId, parsed.data.endpoint);
+  });
+
+  app.post('/push/test', async (request, reply) => {
+    const auth = await authService.authenticate(request.headers.authorization);
+    if (!push.configured) throw new AppError(503, 'PUSH_UNAVAILABLE');
+    const result = await push.notifyTest(auth.userId);
+    if (result.attempted === 0) {
+      throw new AppError(409, 'PUSH_SUBSCRIPTION_REQUIRED');
+    }
+    if (result.delivered === 0) {
+      throw new AppError(503, 'PUSH_DELIVERY_FAILED');
+    }
+    return reply.code(202).send({ queued: true, ...result });
   });
 
   app.delete('/push/subscriptions', async (request, reply) => {
