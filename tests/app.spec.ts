@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { buildApp } from '../src/app.js';
+import { env } from '../src/config/env.js';
 
 describe('health routes', () => {
   const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
@@ -68,6 +69,26 @@ describe('health routes', () => {
 
     expect(refresh.statusCode).toBe(403);
     expect(logout.statusCode).toBe(403);
+  });
+
+  it('allows PATCH requests from configured web origins during CORS preflight', async () => {
+    const app = await buildApp();
+    apps.push(app);
+
+    const response = await app.inject({
+      method: 'OPTIONS',
+      url: '/me/phone',
+      headers: {
+        origin: env.APP_ORIGINS[0],
+        'access-control-request-method': 'PATCH',
+        'access-control-request-headers': 'authorization,content-type',
+      },
+    });
+
+    expect(response.statusCode).toBe(204);
+    expect(response.headers['access-control-allow-origin']).toBe(env.APP_ORIGINS[0]);
+    expect(response.headers['access-control-allow-methods']).toContain('PATCH');
+    expect(response.headers['access-control-allow-headers']).toContain('authorization');
   });
 
   it('protects conversation and message routes with authentication', async () => {
