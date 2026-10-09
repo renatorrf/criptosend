@@ -95,9 +95,9 @@ export async function buildApp(
   registerUserRoutes(app, authService);
   const conversations = new ConversationService();
   const calls = new CallService(conversations);
-  const realtime = new RealtimeHub(app.server, authService, conversations, calls);
-  const messages = new MessageService(conversations);
   const push = new PushService();
+  const realtime = new RealtimeHub(app.server, authService, conversations, calls, push);
+  const messages = new MessageService(conversations);
   const expirationTask = new MessageExpirationTask(
     messages,
     conversations,

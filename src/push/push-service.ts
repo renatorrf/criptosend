@@ -80,15 +80,7 @@ export class PushService {
     recipientUserIds: string[],
     conversationId: string,
   ): Promise<void> {
-    if (!this.configured || recipientUserIds.length === 0) return;
-
-    const result = await databasePool.query<SubscriptionRow>(
-      `SELECT id, endpoint_encrypted, p256dh_encrypted, auth_encrypted
-       FROM ${schema}.push_subscriptions
-       WHERE user_id = ANY($1::uuid[]) AND revoked_at IS NULL`,
-      [recipientUserIds],
-    );
-    const payload = JSON.stringify({
+    await this.notifyUsers(recipientUserIds, {
       notification: {
         title: 'Spotifi',
         body: 'Você recebeu uma nova mensagem.',
@@ -105,7 +97,51 @@ export class PushService {
           },
         },
       },
-    });
+    }, 120);
+  }
+
+  async notifyIncomingCall(
+    recipientUserIds: string[],
+    conversationId: string,
+    callId: string,
+  ): Promise<void> {
+    await this.notifyUsers(recipientUserIds, {
+      notification: {
+        title: 'Chamada de vídeo',
+        body: 'Você está recebendo uma chamada no Spotifi.',
+        icon: '/assets/icon/icon-192x192.png',
+        badge: '/assets/icon/icon-96x96.png',
+        tag: `call-${callId}`,
+        renotify: true,
+        requireInteraction: true,
+        data: {
+          callId,
+          conversationId,
+          onActionClick: {
+            default: {
+              operation: 'navigateLastFocusedOrOpen',
+              url: `/conversations/${conversationId}`,
+            },
+          },
+        },
+      },
+    }, 60);
+  }
+
+  private async notifyUsers(
+    recipientUserIds: string[],
+    body: Record<string, unknown>,
+    ttl: number,
+  ): Promise<void> {
+    if (!this.configured || recipientUserIds.length === 0) return;
+
+    const result = await databasePool.query<SubscriptionRow>(
+      `SELECT id, endpoint_encrypted, p256dh_encrypted, auth_encrypted
+       FROM ${schema}.push_subscriptions
+       WHERE user_id = ANY($1::uuid[]) AND revoked_at IS NULL`,
+      [recipientUserIds],
+    );
+    const payload = JSON.stringify(body);
 
     await Promise.allSettled(
       result.rows.map(async (row) => {
@@ -117,7 +153,7 @@ export class PushService {
           },
         };
         try {
-          await webpush.sendNotification(subscription, payload, { TTL: 120 });
+          await webpush.sendNotification(subscription, payload, { TTL: ttl });
         } catch (error) {
           const statusCode = (error as { statusCode?: number }).statusCode;
           if (statusCode === 404 || statusCode === 410) {

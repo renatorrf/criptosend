@@ -9,6 +9,7 @@ import type { CallService, CallView } from '../calls/call-service.js';
 import { env } from '../config/env.js';
 import type { ConversationService } from '../conversations/conversation-service.js';
 import { AppError } from '../http/app-error.js';
+import type { PushService } from '../push/push-service.js';
 
 const conversationPayloadSchema = z.object({ conversationId: z.uuid() }).strict();
 const callPayloadSchema = z.object({ callId: z.uuid() }).strict();
@@ -117,6 +118,7 @@ export class RealtimeHub {
     authService: AuthService,
     conversations: ConversationService,
     calls: CallService,
+    push: PushService,
   ) {
     this.io = new SocketServer(server, {
       cors: { origin: env.APP_ORIGINS, credentials: true },
@@ -216,11 +218,17 @@ export class RealtimeHub {
           .start(auth.userId, parsed.data.conversationId)
           .then((call) => {
             socketCallIds.add(call.id);
+            const recipients = call.participantUserIds.filter(
+              (userId) => userId !== auth.userId,
+            );
             this.emitToUsers(
-              call.participantUserIds.filter((userId) => userId !== auth.userId),
+              recipients,
               'call:incoming',
               { ...call },
             );
+            void push
+              .notifyIncomingCall(recipients, call.conversationId, call.id)
+              .catch(() => undefined);
             acknowledge?.({ ok: true, call });
           })
           .catch((error: unknown) => {
