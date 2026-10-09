@@ -5,9 +5,10 @@ import type { AuthService } from '../auth/auth-service.js';
 import { AppError } from '../http/app-error.js';
 import type { PushService } from './push-service.js';
 
-const subscriptionSchema = z.object({
+export const subscriptionSchema = z.object({
   endpoint: z.url().max(2048),
-  expirationTime: z.number().nullable(),
+  // Safari/iOS may omit expirationTime from PushSubscription.toJSON().
+  expirationTime: z.number().nullable().optional().transform((value) => value ?? null),
   keys: z.object({
     p256dh: z.string().min(20).max(512),
     auth: z.string().min(8).max(256),
