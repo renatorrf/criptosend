@@ -72,6 +72,7 @@ function validateCloudEnvironment(environment: Record<string, string>): string[]
     'VERIFICATION_CODE_SECRET',
     'CONVERSATION_KEY_SECRET',
     'RTC_TURN_SHARED_SECRET',
+    'PUSH_DEFAULT_OPEN_URL',
     'VAPID_SUBJECT',
     'VAPID_PUBLIC_KEY',
     'VAPID_PRIVATE_KEY',
@@ -170,6 +171,8 @@ if (checkOnly) {
       preserved(currentCloud, local, 'RTC_TURN_CREDENTIAL_TTL_SECONDS') || '3600',
     RTC_RING_TIMEOUT_SECONDS:
       preserved(currentCloud, local, 'RTC_RING_TIMEOUT_SECONDS') || '45',
+    PUSH_DEFAULT_OPEN_URL:
+      local['PUSH_DEFAULT_OPEN_URL']?.trim() || 'https://criptsend.web.app/conversations',
     // The VAPID values form one indivisible credential set. Always copy the
     // complete local set so a regenerated key pair cannot be mixed with stale
     // Cloud Run values from a previous deployment.
@@ -227,7 +230,12 @@ if (checkOnly) {
     ],
     [
       'Web Push notifications',
-      ['VAPID_SUBJECT', 'VAPID_PUBLIC_KEY', 'VAPID_PRIVATE_KEY'],
+      [
+        'PUSH_DEFAULT_OPEN_URL',
+        'VAPID_SUBJECT',
+        'VAPID_PUBLIC_KEY',
+        'VAPID_PRIVATE_KEY',
+      ],
     ],
   ];
 

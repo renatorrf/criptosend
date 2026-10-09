@@ -146,6 +146,7 @@ const environmentSchema = z.object({
     .max(86_400)
     .default(3_600),
   RTC_RING_TIMEOUT_SECONDS: z.coerce.number().int().min(15).max(120).default(45),
+  PUSH_DEFAULT_OPEN_URL: z.url().default('https://criptsend.web.app/conversations'),
   VAPID_SUBJECT: optionalString,
   VAPID_PUBLIC_KEY: optionalString,
   VAPID_PRIVATE_KEY: optionalString,
@@ -190,6 +191,27 @@ if (
 
 if (
   parsedEnvironment.data.NODE_ENV === 'production' &&
+  !parsedEnvironment.data.PUSH_DEFAULT_OPEN_URL.startsWith('https://')
+) {
+  throw new Error(
+    'Invalid or missing environment variables: PUSH_DEFAULT_OPEN_URL',
+  );
+}
+
+const configuredOrigins = parsedEnvironment.data.APP_ORIGINS.split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+if (
+  parsedEnvironment.data.NODE_ENV === 'production' &&
+  !configuredOrigins.includes(new URL(parsedEnvironment.data.PUSH_DEFAULT_OPEN_URL).origin)
+) {
+  throw new Error(
+    'Invalid or missing environment variables: PUSH_DEFAULT_OPEN_URL, APP_ORIGINS',
+  );
+}
+
+if (
+  parsedEnvironment.data.NODE_ENV === 'production' &&
   parsedEnvironment.data.PHONE_VERIFICATION_WEBHOOK_URL &&
   !parsedEnvironment.data.PHONE_VERIFICATION_WEBHOOK_URL.startsWith('https://')
 ) {
@@ -226,9 +248,7 @@ if (configuredVapidValues > 0 && configuredVapidValues < vapidConfiguration.leng
 
 export const env = {
   ...parsedEnvironment.data,
-  APP_ORIGINS: parsedEnvironment.data.APP_ORIGINS.split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean),
+  APP_ORIGINS: configuredOrigins,
   FIELD_ENCRYPTION_KEY: (() => {
     const key = Buffer.from(parsedEnvironment.data.FIELD_ENCRYPTION_KEY, 'base64');
     if (key.length !== 32) {

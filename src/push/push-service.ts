@@ -9,6 +9,11 @@ import { decryptField, encryptField } from '../security/field-crypto.js';
 
 const schema = quoteIdentifier(env.SCHEMA);
 
+export function pushOpenUrl(path?: string): string {
+  if (!path) return env.PUSH_DEFAULT_OPEN_URL;
+  return new URL(path, env.PUSH_DEFAULT_OPEN_URL).toString();
+}
+
 interface SubscriptionRow {
   id: string;
   endpoint_encrypted: Buffer;
@@ -92,7 +97,7 @@ export class PushService {
           onActionClick: {
             default: {
               operation: 'navigateLastFocusedOrOpen',
-              url: `/conversations/${conversationId}`,
+              url: pushOpenUrl(`/conversations/${encodeURIComponent(conversationId)}`),
             },
           },
         },
@@ -120,7 +125,7 @@ export class PushService {
           onActionClick: {
             default: {
               operation: 'navigateLastFocusedOrOpen',
-              url: `/conversations/${conversationId}`,
+              url: pushOpenUrl(`/conversations/${encodeURIComponent(conversationId)}`),
             },
           },
         },
