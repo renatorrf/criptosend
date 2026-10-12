@@ -153,10 +153,11 @@ export class PushService {
     recipientUserIds: string[],
     conversationId: string,
     callId: string,
+    mediaType: 'AUDIO' | 'VIDEO',
   ): Promise<void> {
     await this.notifyUsers(recipientUserIds, {
       notification: {
-        title: 'Chamada de vídeo',
+        title: mediaType === 'AUDIO' ? 'Chamada de áudio' : 'Chamada de vídeo',
         body: 'Você está recebendo uma chamada no Spotifi.',
         icon: pushOpenUrl('/assets/icon/icon-192x192.png'),
         badge: pushOpenUrl('/assets/icon/icon-96x96.png'),
@@ -169,7 +170,7 @@ export class PushService {
           onActionClick: {
             default: {
               operation: 'navigateLastFocusedOrOpen',
-              url: pushOpenUrl(`/conversations/${encodeURIComponent(conversationId)}`),
+              url: pushOpenUrl('/conversations'),
             },
           },
         },

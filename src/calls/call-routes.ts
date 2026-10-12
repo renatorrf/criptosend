@@ -7,6 +7,7 @@ import type { CallService } from './call-service.js';
 import { createIceServers } from './turn-credentials.js';
 
 const conversationParamsSchema = z.object({ id: z.uuid() }).strict();
+const callParamsSchema = z.object({ id: z.uuid() }).strict();
 const listQuerySchema = z
   .object({ limit: z.coerce.number().int().min(1).max(100).default(30) })
   .strict();
@@ -19,6 +20,18 @@ export function registerCallRoutes(
   app.get('/calls/ice-config', async (request) => {
     const auth = await authService.authenticate(request.headers.authorization);
     return { iceServers: createIceServers(auth.userId) };
+  });
+
+  app.get('/calls/pending', async (request) => {
+    const auth = await authService.authenticate(request.headers.authorization);
+    return { call: await calls.pending(auth.userId) };
+  });
+
+  app.get('/calls/:id', async (request) => {
+    const auth = await authService.authenticate(request.headers.authorization);
+    const params = callParamsSchema.safeParse(request.params);
+    if (!params.success) throw new AppError(400, 'INVALID_REQUEST');
+    return { call: await calls.get(auth.userId, params.data.id) };
   });
 
   app.get('/conversations/:id/calls', async (request) => {

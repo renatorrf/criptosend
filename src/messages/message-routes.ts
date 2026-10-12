@@ -18,7 +18,7 @@ const messagesQuerySchema = z
 const base64Schema = z
   .string()
   .min(4)
-  .max(350_000)
+  .max(2_800_000)
   .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/);
 const createMessageSchema = z
   .object({
@@ -32,7 +32,7 @@ const createMessageSchema = z
 
 function decodeCiphertext(value: string): Buffer {
   const buffer = Buffer.from(value, 'base64');
-  if (buffer.length === 0 || buffer.length > 262_144) {
+  if (buffer.length === 0 || buffer.length > 2_097_152) {
     throw new AppError(400, 'INVALID_REQUEST');
   }
   return buffer;
@@ -46,7 +46,8 @@ export function registerMessageRoutes(
   service: MessageService,
   push: PushService,
 ): void {
-  app.get('/conversations/:id/messages', async (request) => {
+  app.get('/conversations/:id/messages', async (request, reply) => {
+    reply.header('cache-control', 'no-store');
     const auth = await authService.authenticate(request.headers.authorization);
     const params = idParamsSchema.safeParse(request.params);
     const query = messagesQuerySchema.safeParse(request.query);
@@ -61,7 +62,8 @@ export function registerMessageRoutes(
     );
   });
 
-  app.post('/conversations/:id/messages', async (request, reply) => {
+  app.post('/conversations/:id/messages', { bodyLimit: 3_000_000 }, async (request, reply) => {
+    reply.header('cache-control', 'no-store');
     const auth = await authService.authenticate(request.headers.authorization);
     const params = idParamsSchema.safeParse(request.params);
     const body = createMessageSchema.safeParse(request.body);

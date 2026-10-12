@@ -281,5 +281,35 @@ export async function verifyTables(): Promise<string[]> {
     throw new Error('Call signaling data must not be persisted.');
   }
 
+  const groupCallColumns = await databasePool.query<{ column_name: string }>(
+    `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = $1
+        AND table_name = 'call_participants'
+        AND column_name IN ('invited_by_user_id', 'invited_at')
+    `,
+    [env.SCHEMA],
+  );
+  if (groupCallColumns.rowCount !== 2) {
+    throw new Error('The configured schema is missing group-call invitation columns.');
+  }
+
+  const audioCallConstraint = await databasePool.query<{ definition: string }>(
+    `
+      SELECT pg_get_constraintdef(constraint_ref.oid) AS definition
+      FROM pg_constraint constraint_ref
+      JOIN pg_class table_ref ON table_ref.oid = constraint_ref.conrelid
+      JOIN pg_namespace namespace_ref ON namespace_ref.oid = table_ref.relnamespace
+      WHERE namespace_ref.nspname = $1
+        AND table_ref.relname = 'call_sessions'
+        AND constraint_ref.conname = 'call_sessions_media_type_check'
+    `,
+    [env.SCHEMA],
+  );
+  if (!audioCallConstraint.rows[0]?.definition.includes('AUDIO')) {
+    throw new Error('The configured schema does not allow audio calls.');
+  }
+
   return existingTables;
 }

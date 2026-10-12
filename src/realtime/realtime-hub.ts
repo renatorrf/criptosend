@@ -12,22 +12,33 @@ import { AppError } from '../http/app-error.js';
 import type { PushService } from '../push/push-service.js';
 
 const conversationPayloadSchema = z.object({ conversationId: z.uuid() }).strict();
+const callStartSchema = z.object({
+  conversationId: z.uuid(),
+  mediaType: z.enum(['AUDIO', 'VIDEO']),
+}).strict();
 const callPayloadSchema = z.object({ callId: z.uuid() }).strict();
+const callInviteSchema = z.object({
+  callId: z.uuid(),
+  phone: z.string().trim().min(8).max(30),
+}).strict();
 const offerSchema = z
   .object({
     callId: z.uuid(),
+    targetUserId: z.uuid(),
     description: z.object({ type: z.literal('offer'), sdp: z.string().max(131_072) }).strict(),
   })
   .strict();
 const answerSchema = z
   .object({
     callId: z.uuid(),
+    targetUserId: z.uuid(),
     description: z.object({ type: z.literal('answer'), sdp: z.string().max(131_072) }).strict(),
   })
   .strict();
 const iceCandidateSchema = z
   .object({
     callId: z.uuid(),
+    targetUserId: z.uuid(),
     candidate: z
       .object({
         candidate: z.string().max(4_096),
@@ -41,6 +52,7 @@ const iceCandidateSchema = z
 const keyExchangeSchema = z
   .object({
     callId: z.uuid(),
+    targetUserId: z.uuid(),
     exchangeId: z.uuid(),
     ephemeralPublicKey: z
       .string()
@@ -69,6 +81,7 @@ interface ClientToServerEvents {
   'typing:start': (payload: unknown) => void;
   'typing:stop': (payload: unknown) => void;
   'call:start': (payload: unknown, acknowledge?: (result: CallAcknowledge) => void) => void;
+  'call:invite': (payload: unknown, acknowledge?: (result: CallAcknowledge) => void) => void;
   'call:accept': (payload: unknown, acknowledge?: (result: CallAcknowledge) => void) => void;
   'call:decline': (payload: unknown, acknowledge?: (result: CallAcknowledge) => void) => void;
   'call:end': (payload: unknown, acknowledge?: (result: CallAcknowledge) => void) => void;
@@ -209,13 +222,13 @@ export class RealtimeHub {
       });
 
       socket.on('call:start', (payload, acknowledge) => {
-        const parsed = conversationPayloadSchema.safeParse(payload);
+        const parsed = callStartSchema.safeParse(payload);
         if (!parsed.success) {
           acknowledge?.({ ok: false, error: 'INVALID_REQUEST' });
           return;
         }
         void calls
-          .start(auth.userId, parsed.data.conversationId)
+          .start(auth.userId, parsed.data.conversationId, parsed.data.mediaType)
           .then((call) => {
             socketCallIds.add(call.id);
             const recipients = call.participantUserIds.filter(
@@ -227,13 +240,41 @@ export class RealtimeHub {
               { ...call },
             );
             void push
-              .notifyIncomingCall(recipients, call.conversationId, call.id)
+              .notifyIncomingCall(recipients, call.conversationId, call.id, call.mediaType)
               .catch(() => undefined);
             acknowledge?.({ ok: true, call });
           })
           .catch((error: unknown) => {
             acknowledge?.({ ok: false, error: callErrorCode(error) });
           });
+      });
+
+      socket.on('call:invite', (payload, acknowledge) => {
+        const parsed = callInviteSchema.safeParse(payload);
+        if (!parsed.success) {
+          acknowledge?.({ ok: false, error: 'INVALID_REQUEST' });
+          return;
+        }
+        void calls.invite(auth.userId, parsed.data.callId, parsed.data.phone)
+          .then((call) => {
+            const previous = new Set(this.joinedParticipantIds(call));
+            const invited = call.participants.find(
+              ({ userId, joinedAt, leftAt }) => !previous.has(userId) && !joinedAt && !leftAt,
+            ) ?? [...call.participants].reverse().find(({ joinedAt, leftAt }) => !joinedAt && !leftAt);
+            if (invited) {
+              this.emitToUsers([invited.userId], 'call:incoming', { ...call });
+              void push.notifyIncomingCall(
+                [invited.userId], call.conversationId, call.id, call.mediaType,
+              ).catch(() => undefined);
+            }
+            this.emitToUsers(this.joinedParticipantIds(call), 'call:accepted', {
+              ...call,
+              actionUserId: auth.userId,
+              actionDeviceId: auth.deviceId,
+            });
+            acknowledge?.({ ok: true, call });
+          })
+          .catch((error: unknown) => acknowledge?.({ ok: false, error: callErrorCode(error) }));
       });
 
       const transitionCall = (
@@ -256,6 +297,7 @@ export class RealtimeHub {
             }
             this.emitToUsers(call.participantUserIds, event, {
               ...call,
+              actionUserId: auth.userId,
               actionDeviceId: auth.deviceId,
             });
             acknowledge?.({ ok: true, call });
@@ -298,14 +340,19 @@ export class RealtimeHub {
           candidate?: unknown;
           exchangeId?: string;
           ephemeralPublicKey?: string;
+          targetUserId: string;
         },
       ): Promise<void> => {
         if (!withinSignalRate()) {
           return;
         }
-        const recipients = await calls.getRelayRecipients(auth.userId, payload.callId);
-        for (const userId of recipients) {
-          this.io.to(`user:${userId}`).emit(event, {
+        const recipient = await calls.getRelayRecipient(
+          auth.userId,
+          payload.callId,
+          payload.targetUserId,
+        );
+        if (recipient) {
+          this.io.to(`user:${recipient}`).emit(event, {
             ...payload,
             fromUserId: auth.userId,
             fromDeviceId: auth.deviceId,
@@ -345,14 +392,9 @@ export class RealtimeHub {
       });
 
       socket.on('disconnect', () => {
-        for (const callId of socketCallIds) {
-          void calls
-            .end(auth.userId, callId)
-            .then((call) => {
-              this.emitToUsers(call.participantUserIds, 'call:ended', { ...call });
-            })
-            .catch(() => undefined);
-        }
+        // Mobile PWAs routinely suspend the websocket while the call UI is
+        // backgrounded. An explicit call:end owns conference termination;
+        // a transient transport disconnect must not hang up every participant.
         socketCallIds.clear();
       });
     });
@@ -366,6 +408,12 @@ export class RealtimeHub {
     for (const userId of new Set(userIds)) {
       this.io.to(`user:${userId}`).emit(event, payload);
     }
+  }
+
+  private joinedParticipantIds(call: CallView): string[] {
+    return call.participants
+      .filter(({ joinedAt, leftAt }) => joinedAt && !leftAt)
+      .map(({ userId }) => userId);
   }
 
   async close(): Promise<void> {
