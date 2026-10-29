@@ -66,7 +66,7 @@ const invitationSchema = z
   .strict();
 const statusSchema = z.object({ status: z.enum(['ACTIVE', 'SUSPENDED']) }).strict();
 const creditGrantSchema = z.object({ amount: z.number().int().min(1).max(1000) }).strict();
-const managerLookupSchema = z.object({ nickname: z.string().trim().min(3).max(40) }).strict();
+const managerLookupSchema = z.object({ username: z.string().trim().min(3).max(40) }).strict();
 const managerNetworkRequestSchema = z.object({ targetManagerId: uuid }).strict();
 const managerNetworkResponseSchema = z
   .object({ decision: z.enum(['ACCEPT', 'DECLINE']) })
@@ -250,7 +250,7 @@ export function registerPlatformAccessRoutes(
   app.post('/management/network/lookup', async (request) => {
     const actor = await authService.authenticate(request.headers.authorization);
     const body = parse(managerLookupSchema, request.body);
-    return service.lookupManager(actor, body.nickname);
+    return service.lookupManager(actor, body.username);
   });
 
   app.post('/management/network/requests', async (request, reply) => {

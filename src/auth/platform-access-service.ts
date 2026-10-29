@@ -812,14 +812,14 @@ export class PlatformAccessService {
 
   async lookupManager(
     actor: AuthContext,
-    nicknameInput: string,
+    usernameInput: string,
   ): Promise<{
     status: ManagerLookupStatus;
     manager?: { id: string; name: string; username: string; nickname: string };
   }> {
     const actorRow = await this.actor(actor.userId);
     if (actorRow.role !== 'MANAGER') throw new AppError(403, 'FORBIDDEN');
-    const nickname = normalizePlatformUsername(nicknameInput);
+    const username = normalizePlatformUsername(usernameInput);
     const managerResult = await databasePool.query<{
       id: string;
       name_encrypted: Buffer;
@@ -828,11 +828,11 @@ export class PlatformAccessService {
     }>(
       `SELECT id, name_encrypted, username, nickname
        FROM ${schema}.users
-       WHERE nickname = $1
+       WHERE username = $1
          AND role = 'MANAGER'
          AND status = 'ACTIVE'
        LIMIT 1`,
-      [nickname],
+      [username],
     );
     const manager = managerResult.rows[0];
     if (!manager) return { status: 'NOT_FOUND' };
