@@ -392,10 +392,20 @@ export class RealtimeHub {
       });
 
       socket.on('disconnect', () => {
-        // Mobile PWAs routinely suspend the websocket while the call UI is
-        // backgrounded. An explicit call:end owns conference termination;
-        // a transient transport disconnect must not hang up every participant.
+        const disconnectedCallIds = [...socketCallIds];
         socketCallIds.clear();
+        for (const callId of disconnectedCallIds) {
+          void calls.end(auth.userId, callId)
+            .then((call) => {
+              this.emitToUsers(call.participantUserIds, 'call:ended', {
+                ...call,
+                actionUserId: auth.userId,
+                actionDeviceId: auth.deviceId,
+                endReason: 'CONNECTION_LOST',
+              });
+            })
+            .catch(() => undefined);
+        }
       });
     });
   }
