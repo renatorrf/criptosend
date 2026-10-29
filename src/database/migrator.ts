@@ -325,5 +325,19 @@ export async function verifyTables(): Promise<string[]> {
     throw new Error('The configured schema is missing user message retention.');
   }
 
+  const securityWipeColumn = await databasePool.query<{ column_name: string }>(
+    `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = $1
+        AND table_name = 'users'
+        AND column_name = 'security_wiped_at'
+    `,
+    [env.SCHEMA],
+  );
+  if (securityWipeColumn.rowCount !== 1) {
+    throw new Error('The configured schema is missing failed-password security wipe state.');
+  }
+
   return existingTables;
 }

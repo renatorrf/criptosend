@@ -95,11 +95,15 @@ export class MessageService {
               created_at, expires_at, deleted_at, deletion_reason
        FROM ${schema}.messages
        WHERE conversation_id = $1
+         AND created_at > COALESCE(
+           (SELECT security_wiped_at FROM ${schema}.users WHERE id = $5),
+           '-infinity'::timestamptz
+         )
          AND (expires_at IS NULL OR expires_at > NOW() OR deleted_at IS NOT NULL)
          AND ($2::timestamptz IS NULL OR (created_at, id) < ($2::timestamptz, $3::uuid))
        ORDER BY created_at DESC, id DESC
        LIMIT $4`,
-      [conversationId, cursor?.createdAt ?? null, cursor?.id ?? null, limit + 1],
+      [conversationId, cursor?.createdAt ?? null, cursor?.id ?? null, limit + 1, userId],
     );
     const hasMore = result.rows.length > limit;
     const page = result.rows.slice(0, limit);

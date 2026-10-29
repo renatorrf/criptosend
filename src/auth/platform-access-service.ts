@@ -20,6 +20,7 @@ import type {
   RecoveryCredentialInput,
 } from './account-access-service.js';
 import { verifyRecoveryProof } from './recovery-proof.js';
+import { registerFailedPasswordAttempt } from './failed-password-security.js';
 
 const schema = quoteIdentifier(env.SCHEMA);
 
@@ -44,7 +45,7 @@ interface CredentialRow {
   user_id: string;
   password_hash: string;
   failed_attempts: number;
-  locked_until: Date | null;
+  trusted_device: boolean;
 }
 
 interface ActorRow {
@@ -374,26 +375,30 @@ export class PlatformAccessService {
     let committed = false;
     try {
       const result = await client.query<CredentialRow>(
-        `SELECT u.id AS user_id, c.password_hash, c.failed_attempts, c.locked_until
+        `SELECT u.id AS user_id, c.password_hash, c.failed_attempts,
+                EXISTS (
+                  SELECT 1 FROM ${schema}.devices d
+                  WHERE d.id = $2::uuid AND d.user_id = u.id AND d.status = 'ACTIVE'
+                ) AS trusted_device
          FROM ${schema}.users u
          JOIN ${schema}.user_credentials c ON c.user_id = u.id
          WHERE u.username = $1 AND u.status = 'ACTIVE'
          FOR UPDATE OF c`,
-        [username],
+        [username, device.deviceId ?? null],
       );
       const credential = result.rows[0];
       const valid = await verifyPassword(credential?.password_hash, password);
-      const locked = credential?.locked_until && credential.locked_until.getTime() > Date.now();
-      if (!credential || !valid || locked) {
+      if (!credential || !valid) {
         if (credential) {
-          await client.query(
-            `UPDATE ${schema}.user_credentials
-             SET failed_attempts = failed_attempts + 1,
-                 locked_until = CASE WHEN failed_attempts + 1 >= 5
-                   THEN NOW() + INTERVAL '15 minutes' ELSE locked_until END
-             WHERE user_id = $1`,
-            [credential.user_id],
-          );
+          await registerFailedPasswordAttempt(client, {
+            userId: credential.user_id,
+            requestId,
+            wipeEligible: credential.trusted_device,
+            ...(credential.trusted_device && device.deviceId
+              ? { deviceId: device.deviceId }
+              : {}),
+            eventType: 'USERNAME_LOGIN',
+          });
           await client.query('COMMIT');
           committed = true;
         }

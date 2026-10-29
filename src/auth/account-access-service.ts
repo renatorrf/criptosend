@@ -21,6 +21,7 @@ import {
 import { hashPassword, verifyPassword } from '../security/pin.js';
 import { createAccessToken, createRefreshToken } from './tokens.js';
 import { verifyRecoveryProof } from './recovery-proof.js';
+import { registerFailedPasswordAttempt } from './failed-password-security.js';
 import type { VerificationProvider } from './verification-provider.js';
 
 const schema = quoteIdentifier(env.SCHEMA);
@@ -49,7 +50,6 @@ interface UserCredentialRow {
   user_id: string;
   password_hash: string;
   failed_attempts: number;
-  locked_until: Date | null;
 }
 
 interface RecoveryRow {
@@ -451,7 +451,7 @@ export class AccountAccessService {
       assertFlow(challenge, flowToken);
       if (challenge.purpose !== 'ACCESS') throw new AppError(400, 'INVALID_ACCESS_FLOW');
       const result = await client.query<UserCredentialRow>(
-        `SELECT u.id AS user_id, c.password_hash, c.failed_attempts, c.locked_until
+        `SELECT u.id AS user_id, c.password_hash, c.failed_attempts
          FROM ${schema}.users u
          JOIN ${schema}.user_credentials c ON c.user_id = u.id
          WHERE u.phone_lookup_hash = $1 AND u.status = 'ACTIVE'
@@ -460,18 +460,14 @@ export class AccountAccessService {
       );
       const credential = result.rows[0];
       const valid = await verifyPassword(credential?.password_hash, password);
-      const locked = credential?.locked_until && credential.locked_until.getTime() > Date.now();
-      if (!credential || !valid || locked) {
+      if (!credential || !valid) {
         if (credential) {
-          await client.query(
-            `UPDATE ${schema}.user_credentials
-             SET failed_attempts = failed_attempts + 1,
-                 locked_until = CASE WHEN failed_attempts + 1 >= 5
-                   THEN NOW() + INTERVAL '15 minutes' ELSE locked_until END
-             WHERE user_id = $1`,
-            [credential.user_id],
-          );
-          await recordEvent(client, 'LOGIN', locked ? 'BLOCKED' : 'FAILURE', requestId, credential.user_id);
+          await registerFailedPasswordAttempt(client, {
+            userId: credential.user_id,
+            requestId,
+            wipeEligible: true,
+            eventType: 'LOGIN',
+          });
         }
         await client.query('COMMIT');
         finished = true;

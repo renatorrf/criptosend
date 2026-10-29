@@ -22,6 +22,7 @@ import {
   verifyAccessToken,
 } from './tokens.js';
 import type { VerificationProvider } from './verification-provider.js';
+import { registerFailedPasswordAttempt } from './failed-password-security.js';
 
 const schema = quoteIdentifier(env.SCHEMA);
 
@@ -39,7 +40,6 @@ interface LoginRow {
   user_id: string;
   password_hash: string;
   failed_attempts: number;
-  locked_until: Date | null;
 }
 
 interface SessionRow {
@@ -62,6 +62,7 @@ interface UserRow {
   read_receipts_enabled: boolean;
   typing_indicators_enabled: boolean;
   message_retention_seconds: number | null;
+  security_wiped_at: Date | null;
   created_at: Date;
 }
 
@@ -316,7 +317,7 @@ export class AuthService {
   ): Promise<SessionTokens> {
     const phoneHash = createPhoneLookupHash(normalizePhone(phoneInput));
     const result = await databasePool.query<LoginRow>(
-      `SELECT u.id AS user_id, c.password_hash, c.failed_attempts, c.locked_until
+      `SELECT u.id AS user_id, c.password_hash, c.failed_attempts
        FROM ${schema}.users u
        JOIN ${schema}.user_credentials c ON c.user_id = u.id
        JOIN ${schema}.devices d ON d.user_id = u.id AND d.id = $2
@@ -327,20 +328,29 @@ export class AuthService {
     );
     const login = result.rows[0];
     const validPin = await verifyPin(login?.password_hash, pin);
-    const locked = login?.locked_until && login.locked_until.getTime() > Date.now();
 
-    if (!login || !validPin || locked) {
+    if (!login || !validPin) {
       if (login) {
-        await databasePool.query(
-          `UPDATE ${schema}.user_credentials
-           SET failed_attempts = failed_attempts + 1,
-               locked_until = CASE
-                 WHEN failed_attempts + 1 >= 5 THEN NOW() + INTERVAL '15 minutes'
-                 ELSE locked_until
-               END
-           WHERE user_id = $1`,
-          [login.user_id],
-        );
+        const client = await beginTransaction();
+        try {
+          await client.query(
+            `SELECT 1 FROM ${schema}.user_credentials WHERE user_id = $1 FOR UPDATE`,
+            [login.user_id],
+          );
+          await registerFailedPasswordAttempt(client, {
+            userId: login.user_id,
+            requestId,
+            wipeEligible: true,
+            deviceId,
+            eventType: 'LOGIN',
+          });
+          await client.query('COMMIT');
+        } catch (error) {
+          await client.query('ROLLBACK');
+          throw error;
+        } finally {
+          client.release();
+        }
       }
       throw new AppError(401, 'INVALID_CREDENTIALS');
     }
@@ -491,7 +501,7 @@ export class AuthService {
     const result = await databasePool.query<UserRow>(
       `SELECT id, name_encrypted, phone_encrypted, username, role, discoverable,
               read_receipts_enabled, typing_indicators_enabled,
-              message_retention_seconds, created_at
+              message_retention_seconds, security_wiped_at, created_at
        FROM ${schema}.users
        WHERE id = $1 AND status = 'ACTIVE'`,
       [userId],
@@ -510,6 +520,7 @@ export class AuthService {
       readReceiptsEnabled: user.read_receipts_enabled,
       typingIndicatorsEnabled: user.typing_indicators_enabled,
       messageRetentionSeconds: user.message_retention_seconds,
+      securityWipedAt: user.security_wiped_at,
       createdAt: user.created_at,
     };
   }

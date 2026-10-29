@@ -291,8 +291,11 @@ export class CallService {
     await this.conversations.assertMember(userId, conversationId);
     const result = await databasePool.query<CallRow>(
       `SELECT ${callColumns} FROM ${schema}.call_sessions c
-       WHERE c.conversation_id = $1 ORDER BY c.created_at DESC, c.id DESC LIMIT $2`,
-      [conversationId, limit],
+       JOIN ${schema}.users actor ON actor.id = $3
+       WHERE c.conversation_id = $1
+         AND c.created_at > COALESCE(actor.security_wiped_at, '-infinity'::timestamptz)
+       ORDER BY c.created_at DESC, c.id DESC LIMIT $2`,
+      [conversationId, limit, userId],
     );
     return Promise.all(result.rows.map((row) => mapCall(databasePool, row)));
   }

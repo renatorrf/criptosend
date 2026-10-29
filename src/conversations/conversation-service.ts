@@ -151,7 +151,8 @@ export class ConversationService {
       await client.query(
         `INSERT INTO ${schema}.conversation_members (conversation_id, user_id)
          VALUES ($1, $2), ($1, $3)
-         ON CONFLICT (conversation_id, user_id) DO NOTHING`,
+         ON CONFLICT (conversation_id, user_id)
+         DO UPDATE SET status = 'ACTIVE', joined_at = NOW()`,
         [id, userId, targetUserId],
       );
       await client.query('COMMIT');
@@ -185,10 +186,12 @@ export class ConversationService {
        JOIN ${schema}.conversation_members peer
          ON peer.conversation_id = c.id AND peer.user_id <> $1 AND peer.status = 'ACTIVE'
        JOIN ${schema}.users u ON u.id = peer.user_id AND u.status = 'ACTIVE'
+       JOIN ${schema}.users actor ON actor.id = $1
        LEFT JOIN LATERAL (
          SELECT id, created_at, deleted_at
          FROM ${schema}.messages
          WHERE conversation_id = c.id
+           AND created_at > COALESCE(actor.security_wiped_at, '-infinity'::timestamptz)
          ORDER BY created_at DESC, id DESC
          LIMIT 1
        ) last_message ON TRUE
@@ -226,9 +229,12 @@ export class ConversationService {
        JOIN ${schema}.conversation_members peer
          ON peer.conversation_id = c.id AND peer.user_id <> $1 AND peer.status = 'ACTIVE'
        JOIN ${schema}.users u ON u.id = peer.user_id AND u.status = 'ACTIVE'
+       JOIN ${schema}.users actor ON actor.id = $1
        LEFT JOIN LATERAL (
          SELECT id, created_at, deleted_at FROM ${schema}.messages
-         WHERE conversation_id = c.id ORDER BY created_at DESC, id DESC LIMIT 1
+         WHERE conversation_id = c.id
+           AND created_at > COALESCE(actor.security_wiped_at, '-infinity'::timestamptz)
+         ORDER BY created_at DESC, id DESC LIMIT 1
        ) last_message ON TRUE
        WHERE c.id = $2 AND c.type = 'DIRECT'`,
       [userId, conversationId],
