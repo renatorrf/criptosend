@@ -61,6 +61,7 @@ interface UserRow {
   discoverable: boolean;
   read_receipts_enabled: boolean;
   typing_indicators_enabled: boolean;
+  message_retention_seconds: number | null;
   created_at: Date;
 }
 
@@ -489,7 +490,8 @@ export class AuthService {
   async getMe(userId: string): Promise<Record<string, unknown>> {
     const result = await databasePool.query<UserRow>(
       `SELECT id, name_encrypted, phone_encrypted, username, role, discoverable,
-              read_receipts_enabled, typing_indicators_enabled, created_at
+              read_receipts_enabled, typing_indicators_enabled,
+              message_retention_seconds, created_at
        FROM ${schema}.users
        WHERE id = $1 AND status = 'ACTIVE'`,
       [userId],
@@ -507,6 +509,7 @@ export class AuthService {
       discoverable: user.discoverable,
       readReceiptsEnabled: user.read_receipts_enabled,
       typingIndicatorsEnabled: user.typing_indicators_enabled,
+      messageRetentionSeconds: user.message_retention_seconds,
       createdAt: user.created_at,
     };
   }
@@ -516,31 +519,59 @@ export class AuthService {
     preferences: {
       readReceiptsEnabled?: boolean | undefined;
       typingIndicatorsEnabled?: boolean | undefined;
+      messageRetentionSeconds?: number | null | undefined;
     },
   ): Promise<Record<string, unknown>> {
-    const result = await databasePool.query<{
-      read_receipts_enabled: boolean;
-      typing_indicators_enabled: boolean;
-    }>(
-      `UPDATE ${schema}.users
-       SET read_receipts_enabled = COALESCE($2, read_receipts_enabled),
-           typing_indicators_enabled = COALESCE($3, typing_indicators_enabled)
-       WHERE id = $1 AND status = 'ACTIVE'
-       RETURNING read_receipts_enabled, typing_indicators_enabled`,
-      [
-        userId,
-        preferences.readReceiptsEnabled ?? null,
-        preferences.typingIndicatorsEnabled ?? null,
-      ],
-    );
-    const updated = result.rows[0];
-    if (!updated) {
-      throw new AppError(404, 'USER_NOT_FOUND');
+    const client = await beginTransaction();
+    try {
+      const retentionProvided = preferences.messageRetentionSeconds !== undefined;
+      const result = await client.query<{
+        read_receipts_enabled: boolean;
+        typing_indicators_enabled: boolean;
+        message_retention_seconds: number | null;
+      }>(
+        `UPDATE ${schema}.users
+         SET read_receipts_enabled = COALESCE($2, read_receipts_enabled),
+             typing_indicators_enabled = COALESCE($3, typing_indicators_enabled),
+             message_retention_seconds = CASE WHEN $4::boolean
+               THEN $5::integer ELSE message_retention_seconds END
+         WHERE id = $1 AND status = 'ACTIVE'
+         RETURNING read_receipts_enabled, typing_indicators_enabled,
+                   message_retention_seconds`,
+        [
+          userId,
+          preferences.readReceiptsEnabled ?? null,
+          preferences.typingIndicatorsEnabled ?? null,
+          retentionProvided,
+          preferences.messageRetentionSeconds ?? null,
+        ],
+      );
+      const updated = result.rows[0];
+      if (!updated) throw new AppError(404, 'USER_NOT_FOUND');
+
+      if (retentionProvided) {
+        await client.query(
+          `UPDATE ${schema}.messages
+           SET expires_at = CASE
+             WHEN $2::integer IS NULL THEN NULL
+             ELSE created_at + ($2::text || ' seconds')::interval
+           END
+           WHERE sender_user_id = $1 AND deleted_at IS NULL`,
+          [userId, preferences.messageRetentionSeconds ?? null],
+        );
+      }
+      await client.query('COMMIT');
+      return {
+        readReceiptsEnabled: updated.read_receipts_enabled,
+        typingIndicatorsEnabled: updated.typing_indicators_enabled,
+        messageRetentionSeconds: updated.message_retention_seconds,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
     }
-    return {
-      readReceiptsEnabled: updated.read_receipts_enabled,
-      typingIndicatorsEnabled: updated.typing_indicators_enabled,
-    };
   }
 
   async listDevices(userId: string): Promise<Record<string, unknown>[]> {

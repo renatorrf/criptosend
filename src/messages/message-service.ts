@@ -32,7 +32,6 @@ export interface CreateMessageInput {
   ciphertext: Buffer;
   cryptoHeader: Buffer | null;
   replyToMessageId: string | null;
-  expiresAt: Date | null;
 }
 
 async function beginTransaction(): Promise<PoolClient> {
@@ -144,7 +143,14 @@ export class MessageService {
         `INSERT INTO ${schema}.messages
            (id, conversation_id, sender_user_id, sender_device_id,
             client_message_id, ciphertext, crypto_header, reply_to_message_id, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         VALUES (
+           $1, $2, $3, $4, $5, $6, $7, $8,
+           (SELECT CASE
+              WHEN message_retention_seconds IS NULL THEN NULL
+              ELSE NOW() + (message_retention_seconds::text || ' seconds')::interval
+            END
+            FROM ${schema}.users WHERE id = $3)
+         )
          ON CONFLICT (sender_device_id, client_message_id) DO NOTHING
          RETURNING id, conversation_id, sender_user_id, sender_device_id,
                    client_message_id, ciphertext, crypto_header, reply_to_message_id,
@@ -158,7 +164,6 @@ export class MessageService {
           input.ciphertext,
           input.cryptoHeader,
           input.replyToMessageId,
-          input.expiresAt,
         ],
       );
       let row = inserted.rows[0];

@@ -77,9 +77,6 @@ export function registerMessageRoutes(
         ? decodeCiphertext(body.data.cryptoHeader)
         : null,
       replyToMessageId: body.data.replyToMessageId ?? null,
-      expiresAt: body.data.expiresInSeconds
-        ? new Date(Date.now() + body.data.expiresInSeconds * 1_000)
-        : null,
     });
     if (result.created) {
       const memberIds = await conversations.listMemberUserIds(params.data.id);

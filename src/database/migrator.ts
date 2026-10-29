@@ -311,5 +311,19 @@ export async function verifyTables(): Promise<string[]> {
     throw new Error('The configured schema does not allow audio calls.');
   }
 
+  const messageRetentionColumn = await databasePool.query<{ column_name: string }>(
+    `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = $1
+        AND table_name = 'users'
+        AND column_name = 'message_retention_seconds'
+    `,
+    [env.SCHEMA],
+  );
+  if (messageRetentionColumn.rowCount !== 1) {
+    throw new Error('The configured schema is missing user message retention.');
+  }
+
   return existingTables;
 }

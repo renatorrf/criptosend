@@ -41,12 +41,14 @@ const privacyPreferencesSchema = z
   .object({
     readReceiptsEnabled: z.boolean().optional(),
     typingIndicatorsEnabled: z.boolean().optional(),
+    messageRetentionSeconds: z.number().int().min(60).max(2_592_000).nullable().optional(),
   })
   .strict()
   .refine(
     (value) =>
       value.readReceiptsEnabled !== undefined ||
-      value.typingIndicatorsEnabled !== undefined,
+      value.typingIndicatorsEnabled !== undefined ||
+      value.messageRetentionSeconds !== undefined,
   );
 
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
