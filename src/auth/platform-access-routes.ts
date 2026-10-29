@@ -13,6 +13,7 @@ import { PlatformAccessService } from './platform-access-service.js';
 const uuid = z.uuid();
 const password = z.string().min(8).max(128);
 const username = z.string().trim().min(3).max(40);
+const nickname = z.string().trim().min(3).max(40);
 const base64 = z
   .string()
   .min(16)
@@ -51,6 +52,7 @@ const redeemSchema = z
     invitationCode: z.string().trim().min(20).max(128),
     name: z.string().trim().min(2).max(100),
     username,
+    nickname,
     password,
     device: deviceSchema,
     recovery: recoverySchema,
@@ -64,7 +66,7 @@ const invitationSchema = z
   .strict();
 const statusSchema = z.object({ status: z.enum(['ACTIVE', 'SUSPENDED']) }).strict();
 const creditGrantSchema = z.object({ amount: z.number().int().min(1).max(1000) }).strict();
-const managerLookupSchema = z.object({ phone: z.string().trim().min(8).max(30) }).strict();
+const managerLookupSchema = z.object({ nickname: z.string().trim().min(3).max(40) }).strict();
 const managerNetworkRequestSchema = z.object({ targetManagerId: uuid }).strict();
 const managerNetworkResponseSchema = z
   .object({ decision: z.enum(['ACCEPT', 'DECLINE']) })
@@ -196,6 +198,7 @@ export function registerPlatformAccessRoutes(
           body.invitationCode,
           body.name,
           body.username,
+          body.nickname,
           body.password,
           mapDevice(body.device),
           mapRecovery(body.recovery),
@@ -247,7 +250,7 @@ export function registerPlatformAccessRoutes(
   app.post('/management/network/lookup', async (request) => {
     const actor = await authService.authenticate(request.headers.authorization);
     const body = parse(managerLookupSchema, request.body);
-    return service.lookupManager(actor, body.phone);
+    return service.lookupManager(actor, body.nickname);
   });
 
   app.post('/management/network/requests', async (request, reply) => {

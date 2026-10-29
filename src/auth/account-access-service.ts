@@ -404,13 +404,14 @@ export class AccountAccessService {
       const userId = randomUUID();
       await client.query(
         `INSERT INTO ${schema}.users
-           (id, phone_encrypted, phone_lookup_hash, name_encrypted)
-         VALUES ($1, $2, $3, $4)`,
+           (id, phone_encrypted, phone_lookup_hash, name_encrypted, nickname)
+         VALUES ($1, $2, $3, $4, $5)`,
         [
           userId,
           encryptField(decryptField(challenge.phone_encrypted, 'phone'), 'phone'),
           challenge.phone_lookup_hash,
           encryptField(name.trim(), 'user-name'),
+          `user-${userId.replaceAll('-', '').slice(0, 8)}`,
         ],
       );
       await client.query(

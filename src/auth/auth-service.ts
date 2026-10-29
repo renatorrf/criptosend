@@ -57,6 +57,7 @@ interface UserRow {
   name_encrypted: Buffer;
   phone_encrypted: Buffer | null;
   username: string | null;
+  nickname: string;
   role: 'PLATFORM_ADMIN' | 'MANAGER' | 'USER';
   discoverable: boolean;
   read_receipts_enabled: boolean;
@@ -246,13 +247,14 @@ export class AuthService {
 
       await client.query(
         `INSERT INTO ${schema}.users
-           (id, phone_encrypted, phone_lookup_hash, name_encrypted)
-         VALUES ($1, $2, $3, $4)`,
+           (id, phone_encrypted, phone_lookup_hash, name_encrypted, nickname)
+         VALUES ($1, $2, $3, $4, $5)`,
         [
           userId,
           encryptField(phone, 'phone'),
           challenge.phone_lookup_hash,
           encryptField(input.name.trim(), 'user-name'),
+          `user-${userId.replaceAll('-', '').slice(0, 8)}`,
         ],
       );
       await client.query(
@@ -499,7 +501,7 @@ export class AuthService {
 
   async getMe(userId: string): Promise<Record<string, unknown>> {
     const result = await databasePool.query<UserRow>(
-      `SELECT id, name_encrypted, phone_encrypted, username, role, discoverable,
+      `SELECT id, name_encrypted, phone_encrypted, username, nickname, role, discoverable,
               read_receipts_enabled, typing_indicators_enabled,
               message_retention_seconds, security_wiped_at, created_at
        FROM ${schema}.users
@@ -515,6 +517,7 @@ export class AuthService {
       name: decryptField(user.name_encrypted, 'user-name'),
       phone: user.phone_encrypted ? decryptField(user.phone_encrypted, 'phone') : null,
       username: user.username,
+      nickname: user.nickname,
       role: user.role,
       discoverable: user.discoverable,
       readReceiptsEnabled: user.read_receipts_enabled,

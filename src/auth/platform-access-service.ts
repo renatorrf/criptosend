@@ -427,12 +427,14 @@ export class PlatformAccessService {
     code: string,
     name: string,
     usernameInput: string,
+    nicknameInput: string,
     password: string,
     device: DeviceInput,
     recovery: RecoveryCredentialInput,
     requestId: string,
   ): Promise<PlatformSession> {
     const username = normalizePlatformUsername(usernameInput);
+    const nickname = normalizePlatformUsername(nicknameInput);
     const client = await beginTransaction();
     try {
       const inviteResult = await client.query<{
@@ -475,20 +477,33 @@ export class PlatformAccessService {
       );
       if (existing.rowCount !== 0) throw new AppError(409, 'USERNAME_ALREADY_EXISTS');
 
+      const managerUserId = invite.role === 'USER' ? invite.created_by_user_id : null;
+      if (managerUserId) {
+        const existingNickname = await client.query(
+          `SELECT 1
+           FROM ${schema}.users
+           WHERE COALESCE(manager_user_id, id) = $1
+             AND nickname = $2`,
+          [managerUserId, nickname],
+        );
+        if (existingNickname.rowCount !== 0) {
+          throw new AppError(409, 'NICKNAME_ALREADY_EXISTS');
+        }
+      }
+
       const userId = randomUUID();
       await client.query(
         `INSERT INTO ${schema}.users
-           (id, phone_encrypted, phone_lookup_hash, name_encrypted, username,
+           (id, phone_encrypted, phone_lookup_hash, name_encrypted, username, nickname,
             role, manager_user_id, discoverable)
-         VALUES ($1, NULL, NULL, $2, $3, $4, $5, FALSE)`,
+         VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6, FALSE)`,
         [
           userId,
           encryptField(name.trim(), 'user-name'),
           username,
+          nickname,
           invite.role,
-          invite.role === 'USER' && invite.creator_role === 'MANAGER'
-            ? invite.created_by_user_id
-            : null,
+          managerUserId,
         ],
       );
       if (invite.role === 'MANAGER') {
@@ -535,7 +550,13 @@ export class PlatformAccessService {
         'code' in error &&
         error.code === '23505'
       ) {
-        throw new AppError(409, 'USERNAME_ALREADY_EXISTS');
+        const constraint = 'constraint' in error ? String(error.constraint) : '';
+        throw new AppError(
+          409,
+          constraint === 'users_network_nickname_unique_idx'
+            ? 'NICKNAME_ALREADY_EXISTS'
+            : 'USERNAME_ALREADY_EXISTS',
+        );
       }
       throw error;
     } finally {
@@ -791,26 +812,27 @@ export class PlatformAccessService {
 
   async lookupManager(
     actor: AuthContext,
-    phoneInput: string,
+    nicknameInput: string,
   ): Promise<{
     status: ManagerLookupStatus;
-    manager?: { id: string; name: string; username: string };
+    manager?: { id: string; name: string; username: string; nickname: string };
   }> {
     const actorRow = await this.actor(actor.userId);
     if (actorRow.role !== 'MANAGER') throw new AppError(403, 'FORBIDDEN');
-    const phone = normalizePhone(phoneInput);
+    const nickname = normalizePlatformUsername(nicknameInput);
     const managerResult = await databasePool.query<{
       id: string;
       name_encrypted: Buffer;
       username: string;
+      nickname: string;
     }>(
-      `SELECT id, name_encrypted, username
+      `SELECT id, name_encrypted, username, nickname
        FROM ${schema}.users
-       WHERE phone_lookup_hash = $1
+       WHERE nickname = $1
          AND role = 'MANAGER'
          AND status = 'ACTIVE'
-         AND discoverable = TRUE`,
-      [createPhoneLookupHash(phone)],
+       LIMIT 1`,
+      [nickname],
     );
     const manager = managerResult.rows[0];
     if (!manager) return { status: 'NOT_FOUND' };
@@ -818,6 +840,7 @@ export class PlatformAccessService {
       id: manager.id,
       name: decryptField(manager.name_encrypted, 'user-name'),
       username: manager.username,
+      nickname: manager.nickname,
     };
     if (manager.id === actor.userId) return { status: 'SELF', manager: summary };
 

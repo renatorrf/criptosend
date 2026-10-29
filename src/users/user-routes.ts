@@ -5,7 +5,7 @@ import type { AuthService } from '../auth/auth-service.js';
 import { AppError } from '../http/app-error.js';
 import { UserService } from './user-service.js';
 
-const lookupSchema = z.object({ phone: z.string().trim().min(8).max(30) }).strict();
+const lookupSchema = z.object({ nickname: z.string().trim().min(3).max(40) }).strict();
 
 export function registerUserRoutes(
   app: FastifyInstance,
@@ -23,10 +23,10 @@ export function registerUserRoutes(
         throw new AppError(400, 'INVALID_REQUEST');
       }
       return {
-        exists: await service.exactPhoneLookup(
+        user: await service.exactNicknameLookup(
           auth.userId,
           auth.deviceId,
-          parsed.data.phone,
+          parsed.data.nickname,
           request.id,
         ),
       };

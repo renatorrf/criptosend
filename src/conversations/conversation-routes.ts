@@ -7,7 +7,12 @@ import type { RealtimeHub } from '../realtime/realtime-hub.js';
 import { ConversationService } from './conversation-service.js';
 
 const idParamsSchema = z.object({ id: z.uuid() }).strict();
-const directSchema = z.object({ phone: z.string().trim().min(8).max(30) }).strict();
+const nickname = z.string().trim().min(3).max(40);
+const directSchema = z.object({ nickname }).strict();
+const groupSchema = z.object({
+  name: z.string().trim().min(2).max(80),
+  nicknames: z.array(nickname).min(1).max(49),
+}).strict();
 const listQuerySchema = z.object({ search: z.string().trim().max(80).optional() }).strict();
 
 export function registerConversationRoutes(
@@ -33,7 +38,21 @@ export function registerConversationRoutes(
     if (!parsed.success) {
       throw new AppError(400, 'INVALID_REQUEST');
     }
-    const conversation = await conversations.createDirect(auth.userId, parsed.data.phone);
+    const conversation = await conversations.createDirect(auth.userId, parsed.data.nickname);
+    const memberIds = await conversations.listMemberUserIds(conversation.id);
+    realtime.emitToUsers(memberIds, 'conversation:created', conversation);
+    return reply.code(201).send(conversation);
+  });
+
+  app.post('/conversations/groups', async (request, reply) => {
+    const auth = await authService.authenticate(request.headers.authorization);
+    const parsed = groupSchema.safeParse(request.body);
+    if (!parsed.success) throw new AppError(400, 'INVALID_REQUEST');
+    const conversation = await conversations.createGroup(
+      auth.userId,
+      parsed.data.name,
+      parsed.data.nicknames,
+    );
     const memberIds = await conversations.listMemberUserIds(conversation.id);
     realtime.emitToUsers(memberIds, 'conversation:created', conversation);
     return reply.code(201).send(conversation);

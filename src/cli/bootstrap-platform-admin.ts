@@ -36,8 +36,8 @@ async function main(): Promise<void> {
     await client.query(
       `INSERT INTO ${schema}.users
          (id, phone_encrypted, phone_lookup_hash, name_encrypted, username,
-          role, discoverable)
-       VALUES ($1, NULL, NULL, $2, $3, 'PLATFORM_ADMIN', FALSE)`,
+          nickname, role, discoverable)
+       VALUES ($1, NULL, NULL, $2, $3, $3, 'PLATFORM_ADMIN', FALSE)`,
       [userId, encryptField(name, 'user-name'), username],
     );
     await client.query(
