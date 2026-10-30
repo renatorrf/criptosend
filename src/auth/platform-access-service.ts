@@ -91,11 +91,11 @@ export function managerPair(left: string, right: string): [string, string] {
   return left < right ? [left, right] : [right, left];
 }
 
-export function requiresManagerRecoveryAfterWipe(
+export function requiresManagerRecoveryAfterFailures(
   role: PlatformRole,
-  wiped: boolean,
+  failedAttempts: number,
 ): boolean {
-  return role === 'MANAGER' && wiped;
+  return role === 'MANAGER' && failedAttempts >= 3;
 }
 
 async function beginTransaction(): Promise<PoolClient> {
@@ -415,13 +415,20 @@ export class PlatformAccessService {
           const failure = await registerFailedPasswordAttempt(client, {
             userId: credential.user_id,
             requestId,
-            wipeEligible: credential.trusted_device,
+            // Managers must prove possession of the administrator-issued token
+            // after the third failure. Their private data is only removed after
+            // that token is validated, preventing a username-only destructive DoS.
+            wipeEligible: credential.role !== 'MANAGER' && credential.trusted_device,
             ...(credential.trusted_device && device.deviceId
               ? { deviceId: device.deviceId }
               : {}),
             eventType: 'USERNAME_LOGIN',
           });
-          if (requiresManagerRecoveryAfterWipe(credential.role, failure.wiped)) {
+          const managerRecoveryRequired = requiresManagerRecoveryAfterFailures(
+            credential.role,
+            failure.failedAttempts,
+          );
+          if (managerRecoveryRequired) {
             await client.query(
               `UPDATE ${schema}.user_credentials
                SET reset_required_at = NOW(),
@@ -433,7 +440,7 @@ export class PlatformAccessService {
           }
           await client.query('COMMIT');
           committed = true;
-          if (requiresManagerRecoveryAfterWipe(credential.role, failure.wiped)) {
+          if (managerRecoveryRequired) {
             throw new AppError(403, 'MANAGER_RECOVERY_TOKEN_REQUIRED');
           }
         }

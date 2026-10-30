@@ -5,7 +5,7 @@ import {
   canCreateInvitation,
   managerPair,
   normalizePlatformUsername,
-  requiresManagerRecoveryAfterWipe,
+  requiresManagerRecoveryAfterFailures,
 } from '../src/auth/platform-access-service.js';
 
 describe('platform access policy', () => {
@@ -35,10 +35,12 @@ describe('platform access policy', () => {
     ]);
   });
 
-  it('requires the manager recovery token only after a destructive third failure', () => {
-    expect(requiresManagerRecoveryAfterWipe('MANAGER', true)).toBe(true);
-    expect(requiresManagerRecoveryAfterWipe('MANAGER', false)).toBe(false);
-    expect(requiresManagerRecoveryAfterWipe('USER', true)).toBe(false);
-    expect(requiresManagerRecoveryAfterWipe('PLATFORM_ADMIN', true)).toBe(false);
+  it('requires the manager recovery token from the third failure onward', () => {
+    expect(requiresManagerRecoveryAfterFailures('MANAGER', 1)).toBe(false);
+    expect(requiresManagerRecoveryAfterFailures('MANAGER', 2)).toBe(false);
+    expect(requiresManagerRecoveryAfterFailures('MANAGER', 3)).toBe(true);
+    expect(requiresManagerRecoveryAfterFailures('MANAGER', 4)).toBe(true);
+    expect(requiresManagerRecoveryAfterFailures('USER', 3)).toBe(false);
+    expect(requiresManagerRecoveryAfterFailures('PLATFORM_ADMIN', 3)).toBe(false);
   });
 });
