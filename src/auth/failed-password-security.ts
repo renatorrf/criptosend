@@ -59,10 +59,11 @@ export async function registerFailedPasswordAttempt(
   return { failedAttempts, wiped };
 }
 
-async function wipeUserPrivateData(
+export async function wipeUserPrivateData(
   client: PoolClient,
   userId: string,
   requestId: string,
+  eventType = 'FAILED_PASSWORD_DATA_WIPE',
 ): Promise<void> {
   // End active calls before removing this user from their participant lists.
   await client.query(
@@ -130,6 +131,10 @@ async function wipeUserPrivateData(
     `DELETE FROM ${schema}.username_recovery_challenges WHERE user_id = $1`,
     [userId],
   );
+  await client.query(
+    `DELETE FROM ${schema}.user_access_reset_tokens WHERE user_id = $1`,
+    [userId],
+  );
   await client.query(`DELETE FROM ${schema}.auth_sessions WHERE user_id = $1`, [userId]);
   await client.query(`DELETE FROM ${schema}.push_subscriptions WHERE user_id = $1`, [userId]);
   await client.query(`DELETE FROM ${schema}.device_media_keys WHERE user_id = $1`, [userId]);
@@ -148,7 +153,7 @@ async function wipeUserPrivateData(
   await client.query(
     `INSERT INTO ${schema}.security_events
        (id, user_id, device_id, event_type, outcome, request_id)
-     VALUES ($1, $2, NULL, 'FAILED_PASSWORD_DATA_WIPE', 'SUCCESS', $3)`,
-    [randomUUID(), userId, requestId],
+     VALUES ($1, $2, NULL, $3, 'SUCCESS', $4)`,
+    [randomUUID(), userId, eventType, requestId],
   );
 }

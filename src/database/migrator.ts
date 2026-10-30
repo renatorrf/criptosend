@@ -128,6 +128,8 @@ export async function verifyTables(): Promise<string[]> {
     'manager_invitation_grants',
     'manager_network_requests',
     'manager_network_links',
+    'manager_recovery_tokens',
+    'user_access_reset_tokens',
     'user_credentials',
     'users',
     'call_events',
@@ -337,6 +339,20 @@ export async function verifyTables(): Promise<string[]> {
   );
   if (securityWipeColumn.rowCount !== 1) {
     throw new Error('The configured schema is missing failed-password security wipe state.');
+  }
+
+  const credentialResetColumns = await databasePool.query<{ column_name: string }>(
+    `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = $1
+        AND table_name = 'user_credentials'
+        AND column_name IN ('reset_required_at', 'reset_reason', 'reset_requested_by_user_id')
+    `,
+    [env.SCHEMA],
+  );
+  if (credentialResetColumns.rowCount !== 3) {
+    throw new Error('The configured schema is missing credential reset state.');
   }
 
   return existingTables;

@@ -81,6 +81,15 @@ const usernameRecoveryStartSchema = z.object({ username }).strict();
 const usernameRecoveryCompleteSchema = z
   .object({ recoveryId: uuid, signature: base64, newPassword: password })
   .strict();
+const credentialResetCompleteSchema = z
+  .object({
+    username,
+    token: z.string().trim().min(20).max(128),
+    newPassword: password,
+    device: deviceSchema,
+    recovery: recoverySchema,
+  })
+  .strict();
 
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const parsed = schema.safeParse(value);
@@ -187,6 +196,25 @@ export function registerPlatformAccessRoutes(
   );
 
   app.post(
+    '/auth/credential-reset/complete',
+    { config: { rateLimit: { max: 5, timeWindow: '1 hour' } } },
+    async (request, reply) => {
+      const body = parse(credentialResetCompleteSchema, request.body);
+      return respondWithSession(
+        reply,
+        await service.completeCredentialReset(
+          body.username,
+          body.token,
+          body.newPassword,
+          mapDevice(body.device),
+          mapRecovery(body.recovery),
+          request.id,
+        ),
+      );
+    },
+  );
+
+  app.post(
     '/auth/invitations/redeem',
     { config: { rateLimit: { max: 5, timeWindow: '1 hour' } } },
     async (request, reply) => {
@@ -245,6 +273,22 @@ export function registerPlatformAccessRoutes(
     return reply
       .code(201)
       .send(await service.grantInvitationCredits(actor, params.id, body.amount, request.id));
+  });
+
+  app.post('/management/managers/:id/recovery-token', async (request, reply) => {
+    const actor = await authService.authenticate(request.headers.authorization);
+    const params = parse(z.object({ id: uuid }).strict(), request.params);
+    return reply
+      .code(201)
+      .send(await service.rotateManagerRecoveryToken(actor, params.id, request.id));
+  });
+
+  app.post('/management/users/:id/access-reset', async (request, reply) => {
+    const actor = await authService.authenticate(request.headers.authorization);
+    const params = parse(z.object({ id: uuid }).strict(), request.params);
+    return reply
+      .code(201)
+      .send(await service.requestManagedUserAccessReset(actor, params.id, request.id));
   });
 
   app.post('/management/network/lookup', async (request) => {

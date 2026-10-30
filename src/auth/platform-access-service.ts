@@ -20,9 +20,13 @@ import type {
   RecoveryCredentialInput,
 } from './account-access-service.js';
 import { verifyRecoveryProof } from './recovery-proof.js';
-import { registerFailedPasswordAttempt } from './failed-password-security.js';
+import {
+  registerFailedPasswordAttempt,
+  wipeUserPrivateData,
+} from './failed-password-security.js';
 
 const schema = quoteIdentifier(env.SCHEMA);
+const USER_ACCESS_RESET_TTL_SECONDS = 24 * 60 * 60;
 
 export type PlatformRole = 'PLATFORM_ADMIN' | 'MANAGER' | 'USER';
 export type ManagerLookupStatus =
@@ -46,6 +50,8 @@ interface CredentialRow {
   password_hash: string;
   failed_attempts: number;
   trusted_device: boolean;
+  role: PlatformRole;
+  reset_required_at: Date | null;
 }
 
 interface ActorRow {
@@ -83,6 +89,13 @@ export function canCreateInvitation(
 
 export function managerPair(left: string, right: string): [string, string] {
   return left < right ? [left, right] : [right, left];
+}
+
+export function requiresManagerRecoveryAfterWipe(
+  role: PlatformRole,
+  wiped: boolean,
+): boolean {
+  return role === 'MANAGER' && wiped;
 }
 
 async function beginTransaction(): Promise<PoolClient> {
@@ -375,7 +388,8 @@ export class PlatformAccessService {
     let committed = false;
     try {
       const result = await client.query<CredentialRow>(
-        `SELECT u.id AS user_id, c.password_hash, c.failed_attempts,
+        `SELECT u.id AS user_id, u.role, c.password_hash, c.failed_attempts,
+                c.reset_required_at,
                 EXISTS (
                   SELECT 1 FROM ${schema}.devices d
                   WHERE d.id = $2::uuid AND d.user_id = u.id AND d.status = 'ACTIVE'
@@ -387,10 +401,18 @@ export class PlatformAccessService {
         [username, device.deviceId ?? null],
       );
       const credential = result.rows[0];
+      if (credential?.reset_required_at) {
+        throw new AppError(
+          403,
+          credential.role === 'MANAGER'
+            ? 'MANAGER_RECOVERY_TOKEN_REQUIRED'
+            : 'CREDENTIAL_RESET_REQUIRED',
+        );
+      }
       const valid = await verifyPassword(credential?.password_hash, password);
       if (!credential || !valid) {
         if (credential) {
-          await registerFailedPasswordAttempt(client, {
+          const failure = await registerFailedPasswordAttempt(client, {
             userId: credential.user_id,
             requestId,
             wipeEligible: credential.trusted_device,
@@ -399,8 +421,21 @@ export class PlatformAccessService {
               : {}),
             eventType: 'USERNAME_LOGIN',
           });
+          if (requiresManagerRecoveryAfterWipe(credential.role, failure.wiped)) {
+            await client.query(
+              `UPDATE ${schema}.user_credentials
+               SET reset_required_at = NOW(),
+                   reset_reason = 'FAILED_ATTEMPTS',
+                   reset_requested_by_user_id = NULL
+               WHERE user_id = $1`,
+              [credential.user_id],
+            );
+          }
           await client.query('COMMIT');
           committed = true;
+          if (requiresManagerRecoveryAfterWipe(credential.role, failure.wiped)) {
+            throw new AppError(403, 'MANAGER_RECOVERY_TOKEN_REQUIRED');
+          }
         }
         throw new AppError(401, 'INVALID_CREDENTIALS');
       }
@@ -676,10 +711,17 @@ export class PlatformAccessService {
       available_credits: number | null;
       consumed_credits: number | null;
       active_invitations: number | null;
+      reset_required_at: Date | null;
+      recovery_token_configured: boolean;
     }>(
       actorRow.role === 'PLATFORM_ADMIN'
         ? `SELECT u.id, u.username, u.name_encrypted, u.role, u.status,
                   u.phone_encrypted, u.created_at,
+                  c.reset_required_at,
+                  EXISTS (
+                    SELECT 1 FROM ${schema}.manager_recovery_tokens token
+                    WHERE token.manager_user_id = u.id AND token.consumed_at IS NULL
+                  ) AS recovery_token_configured,
                   COALESCE(b.available_credits, 0) AS available_credits,
                   COALESCE(b.consumed_credits, 0) AS consumed_credits,
                   (SELECT COUNT(*)::INTEGER
@@ -690,14 +732,18 @@ export class PlatformAccessService {
                      AND i.revoked_at IS NULL
                      AND i.expires_at > NOW()) AS active_invitations
            FROM ${schema}.users u
+           JOIN ${schema}.user_credentials c ON c.user_id = u.id
            LEFT JOIN ${schema}.manager_invitation_balances b ON b.manager_user_id = u.id
            WHERE u.role = 'MANAGER' ORDER BY u.created_at DESC`
         : `SELECT u.id, u.username, u.name_encrypted, u.role, u.status,
                   u.phone_encrypted, u.created_at,
+                  c.reset_required_at,
+                  FALSE AS recovery_token_configured,
                   NULL::INTEGER AS available_credits,
                   NULL::INTEGER AS consumed_credits,
                   NULL::INTEGER AS active_invitations
            FROM ${schema}.users u
+           JOIN ${schema}.user_credentials c ON c.user_id = u.id
            WHERE u.manager_user_id = $1 ORDER BY u.created_at DESC`,
       actorRow.role === 'PLATFORM_ADMIN' ? [] : [actor.userId],
     );
@@ -709,6 +755,8 @@ export class PlatformAccessService {
       status: user.status,
       hasPhone: user.phone_encrypted !== null,
       createdAt: user.created_at,
+      resetRequired: user.reset_required_at !== null,
+      recoveryTokenConfigured: user.recovery_token_configured,
       ...(user.available_credits !== null
         ? {
             availableCredits: user.available_credits,
@@ -717,6 +765,214 @@ export class PlatformAccessService {
           }
         : {}),
     }));
+  }
+
+  async requestManagedUserAccessReset(
+    actor: AuthContext,
+    targetUserId: string,
+    requestId: string,
+  ): Promise<{ token: string; expiresAt: Date }> {
+    const actorRow = await this.actor(actor.userId);
+    if (actorRow.role !== 'MANAGER' || targetUserId === actor.userId) {
+      throw new AppError(403, 'FORBIDDEN');
+    }
+    const token = `ur_${randomBytes(32).toString('base64url')}`;
+    const expiresAt = new Date(Date.now() + USER_ACCESS_RESET_TTL_SECONDS * 1_000);
+    const client = await beginTransaction();
+    try {
+      const target = await client.query(
+        `SELECT 1 FROM ${schema}.users
+         WHERE id = $1 AND role = 'USER' AND manager_user_id = $2
+         FOR UPDATE`,
+        [targetUserId, actor.userId],
+      );
+      if (target.rowCount !== 1) throw new AppError(404, 'USER_NOT_FOUND');
+
+      await wipeUserPrivateData(
+        client,
+        targetUserId,
+        requestId,
+        'MANAGED_USER_DATA_WIPE',
+      );
+      await client.query(
+        `UPDATE ${schema}.user_credentials
+         SET failed_attempts = 0,
+             locked_until = NULL,
+             reset_required_at = NOW(),
+             reset_reason = 'MANAGER_REQUEST',
+             reset_requested_by_user_id = $2
+         WHERE user_id = $1`,
+        [targetUserId, actor.userId],
+      );
+      await client.query(
+        `INSERT INTO ${schema}.user_access_reset_tokens
+           (id, user_id, token_hash, created_by_user_id, expires_at)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [randomUUID(), targetUserId, await hashPassword(token), actor.userId, expiresAt],
+      );
+      await recordEvent(
+        client,
+        'MANAGED_USER_ACCESS_RESET_REQUESTED',
+        requestId,
+        actor.userId,
+        actor.deviceId,
+      );
+      await client.query('COMMIT');
+      return { token, expiresAt };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async rotateManagerRecoveryToken(
+    actor: AuthContext,
+    managerUserId: string,
+    requestId: string,
+  ): Promise<{ token: string; createdAt: Date }> {
+    const actorRow = await this.actor(actor.userId);
+    if (actorRow.role !== 'PLATFORM_ADMIN') throw new AppError(403, 'FORBIDDEN');
+    const token = `mr_${randomBytes(32).toString('base64url')}`;
+    const createdAt = new Date();
+    const client = await beginTransaction();
+    try {
+      const manager = await client.query(
+        `SELECT 1 FROM ${schema}.users
+         WHERE id = $1 AND role = 'MANAGER' AND status = 'ACTIVE'`,
+        [managerUserId],
+      );
+      if (manager.rowCount !== 1) throw new AppError(404, 'MANAGER_NOT_FOUND');
+      await client.query(
+        `INSERT INTO ${schema}.manager_recovery_tokens
+           (manager_user_id, token_hash, generated_by_user_id, created_at, consumed_at)
+         VALUES ($1, $2, $3, $4, NULL)
+         ON CONFLICT (manager_user_id) DO UPDATE SET
+           token_hash = EXCLUDED.token_hash,
+           generated_by_user_id = EXCLUDED.generated_by_user_id,
+           created_at = EXCLUDED.created_at,
+           consumed_at = NULL`,
+        [managerUserId, await hashPassword(token), actor.userId, createdAt],
+      );
+      await recordEvent(
+        client,
+        'MANAGER_RECOVERY_TOKEN_ROTATED',
+        requestId,
+        actor.userId,
+        actor.deviceId,
+      );
+      await client.query('COMMIT');
+      return { token, createdAt };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async completeCredentialReset(
+    usernameInput: string,
+    token: string,
+    newPassword: string,
+    device: DeviceInput,
+    recovery: RecoveryCredentialInput,
+    requestId: string,
+  ): Promise<PlatformSession> {
+    const username = normalizePlatformUsername(usernameInput);
+    const client = await beginTransaction();
+    let committed = false;
+    try {
+      const userResult = await client.query<{
+        id: string;
+        role: PlatformRole;
+        reset_required_at: Date | null;
+      }>(
+        `SELECT u.id, u.role, c.reset_required_at
+         FROM ${schema}.users u
+         JOIN ${schema}.user_credentials c ON c.user_id = u.id
+         WHERE u.username = $1 AND u.status = 'ACTIVE'
+         FOR UPDATE OF c`,
+        [username],
+      );
+      const user = userResult.rows[0];
+      let tokenHash: string | undefined;
+      if (user?.role === 'USER' && user.reset_required_at) {
+        const reset = await client.query<{ token_hash: string }>(
+          `SELECT token_hash
+           FROM ${schema}.user_access_reset_tokens
+           WHERE user_id = $1 AND consumed_at IS NULL AND expires_at > NOW()
+           FOR UPDATE`,
+          [user.id],
+        );
+        tokenHash = reset.rows[0]?.token_hash;
+      } else if (user?.role === 'MANAGER') {
+        const managerToken = await client.query<{ token_hash: string }>(
+          `SELECT token_hash
+           FROM ${schema}.manager_recovery_tokens
+           WHERE manager_user_id = $1 AND consumed_at IS NULL
+           FOR UPDATE`,
+          [user.id],
+        );
+        tokenHash = managerToken.rows[0]?.token_hash;
+      }
+
+      const valid = await verifyPassword(tokenHash, token.trim());
+      if (!user || !valid || user.role === 'PLATFORM_ADMIN') {
+        throw new AppError(401, 'INVALID_RESET_TOKEN');
+      }
+
+      await wipeUserPrivateData(
+        client,
+        user.id,
+        requestId,
+        'CREDENTIAL_RESET_DATA_WIPE',
+      );
+      await client.query(
+        `UPDATE ${schema}.user_credentials
+         SET password_hash = $2,
+             failed_attempts = 0,
+             locked_until = NULL,
+             reset_required_at = NULL,
+             reset_reason = NULL,
+             reset_requested_by_user_id = NULL
+         WHERE user_id = $1`,
+        [user.id, await hashPassword(newPassword)],
+      );
+      await client.query(
+        `UPDATE ${schema}.devices
+         SET status = 'REVOKED', revoked_at = COALESCE(revoked_at, NOW())
+         WHERE user_id = $1 AND status = 'ACTIVE'`,
+        [user.id],
+      );
+      const deviceId = await insertDevice(client, user.id, device);
+      await upsertRecovery(client, user.id, recovery);
+      if (user.role === 'MANAGER') {
+        await client.query(
+          `UPDATE ${schema}.manager_recovery_tokens
+           SET consumed_at = NOW()
+           WHERE manager_user_id = $1`,
+          [user.id],
+        );
+      }
+      const session = await createSession(client, user.id, deviceId);
+      await recordEvent(
+        client,
+        'CREDENTIAL_RESET_COMPLETED',
+        requestId,
+        user.id,
+        deviceId,
+      );
+      await client.query('COMMIT');
+      committed = true;
+      return session;
+    } catch (error) {
+      if (!committed) await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async getInvitationBalance(actor: AuthContext): Promise<{
