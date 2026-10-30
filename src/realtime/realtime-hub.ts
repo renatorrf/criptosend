@@ -15,11 +15,12 @@ const conversationPayloadSchema = z.object({ conversationId: z.uuid() }).strict(
 const callStartSchema = z.object({
   conversationId: z.uuid(),
   mediaType: z.enum(['AUDIO', 'VIDEO']),
+  participantUserIds: z.array(z.uuid()).min(1).max(3).optional(),
 }).strict();
 const callPayloadSchema = z.object({ callId: z.uuid() }).strict();
 const callInviteSchema = z.object({
   callId: z.uuid(),
-  phone: z.string().trim().min(8).max(30),
+  nickname: z.string().trim().min(3).max(41),
 }).strict();
 const offerSchema = z
   .object({
@@ -118,6 +119,8 @@ function callErrorCode(error: unknown): string {
   return error instanceof AppError ? error.code : 'CALL_OPERATION_FAILED';
 }
 
+const CALL_DISCONNECT_GRACE_MS = 20_000;
+
 export class RealtimeHub {
   private readonly io: SocketServer<
     ClientToServerEvents,
@@ -125,6 +128,7 @@ export class RealtimeHub {
     Record<string, never>,
     SocketData
   >;
+  private readonly disconnectTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(
     server: HttpServer,
@@ -170,6 +174,16 @@ export class RealtimeHub {
       let signalCount = 0;
       const socketCallIds = new Set<string>();
       void socket.join(`user:${auth.userId}`);
+      for (const [key, timer] of this.disconnectTimers) {
+        if (key.startsWith(`${auth.userId}:`)) {
+          clearTimeout(timer);
+          this.disconnectTimers.delete(key);
+        }
+      }
+      void calls.pending(auth.userId).then((call) => {
+        const self = call?.participants.find(({ userId }) => userId === auth.userId);
+        if (call && self?.joinedAt && !self.leftAt) socketCallIds.add(call.id);
+      }).catch(() => undefined);
       socket.emit('auth:user', { authenticated: true });
 
       socket.on('conversation:join', async (payload, acknowledge) => {
@@ -228,7 +242,12 @@ export class RealtimeHub {
           return;
         }
         void calls
-          .start(auth.userId, parsed.data.conversationId, parsed.data.mediaType)
+          .start(
+            auth.userId,
+            parsed.data.conversationId,
+            parsed.data.mediaType,
+            parsed.data.participantUserIds,
+          )
           .then((call) => {
             socketCallIds.add(call.id);
             const recipients = call.participantUserIds.filter(
@@ -255,7 +274,7 @@ export class RealtimeHub {
           acknowledge?.({ ok: false, error: 'INVALID_REQUEST' });
           return;
         }
-        void calls.invite(auth.userId, parsed.data.callId, parsed.data.phone)
+        void calls.invite(auth.userId, parsed.data.callId, parsed.data.nickname)
           .then((call) => {
             const previous = new Set(this.joinedParticipantIds(call));
             const invited = call.participants.find(
@@ -395,16 +414,27 @@ export class RealtimeHub {
         const disconnectedCallIds = [...socketCallIds];
         socketCallIds.clear();
         for (const callId of disconnectedCallIds) {
-          void calls.end(auth.userId, callId)
-            .then((call) => {
-              this.emitToUsers(call.participantUserIds, 'call:ended', {
-                ...call,
-                actionUserId: auth.userId,
-                actionDeviceId: auth.deviceId,
-                endReason: 'CONNECTION_LOST',
-              });
-            })
-            .catch(() => undefined);
+          const timerKey = `${auth.userId}:${callId}`;
+          const previous = this.disconnectTimers.get(timerKey);
+          if (previous) clearTimeout(previous);
+          const timer = setTimeout(() => {
+            this.disconnectTimers.delete(timerKey);
+            void this.io.in(`user:${auth.userId}`).fetchSockets()
+              .then((sockets) => {
+                if (sockets.length > 0) return undefined;
+                return calls.end(auth.userId, callId).then((call) => {
+                  this.emitToUsers(call.participantUserIds, 'call:ended', {
+                    ...call,
+                    actionUserId: auth.userId,
+                    actionDeviceId: auth.deviceId,
+                    endReason: 'CONNECTION_LOST',
+                  });
+                });
+              })
+              .catch(() => undefined);
+          }, CALL_DISCONNECT_GRACE_MS);
+          timer.unref();
+          this.disconnectTimers.set(timerKey, timer);
         }
       });
     });
@@ -427,6 +457,8 @@ export class RealtimeHub {
   }
 
   async close(): Promise<void> {
+    for (const timer of this.disconnectTimers.values()) clearTimeout(timer);
+    this.disconnectTimers.clear();
     await this.io.close();
   }
 }

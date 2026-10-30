@@ -99,8 +99,9 @@ describe('health routes', () => {
     const lookup = await app.inject({
       method: 'POST',
       url: '/users/lookup',
-      payload: { phone: '34999999999' },
+      payload: { nickname: 'usuario.teste' },
     });
+    const directory = await app.inject({ method: 'GET', url: '/users?search=usuario' });
     const messages = await app.inject({
       method: 'GET',
       url: '/conversations/1c39cf64-b652-4a5b-82b8-9dfec96b4695/messages',
@@ -108,6 +109,7 @@ describe('health routes', () => {
 
     expect(conversations.statusCode).toBe(401);
     expect(lookup.statusCode).toBe(401);
+    expect(directory.statusCode).toBe(401);
     expect(messages.statusCode).toBe(401);
   });
 

@@ -6,10 +6,8 @@ import { env } from '../config/env.js';
 import type { ConversationService } from '../conversations/conversation-service.js';
 import { quoteIdentifier } from '../database/identifier.js';
 import { databasePool } from '../database/pool.js';
-import { normalizePhone } from '../identity/phone.js';
 import { AppError } from '../http/app-error.js';
 import { decryptField } from '../security/field-crypto.js';
-import { createPhoneLookupHash } from '../security/hashes.js';
 
 const schema = quoteIdentifier(env.SCHEMA);
 const MAX_CALL_PARTICIPANTS = 4;
@@ -114,23 +112,44 @@ const callColumns = `c.id, c.conversation_id, c.initiated_by_user_id, c.media_ty
 export class CallService {
   constructor(private readonly conversations: ConversationService) {}
 
-  async start(userId: string, conversationId: string, mediaType: CallMediaType): Promise<CallView> {
+  async start(
+    userId: string,
+    conversationId: string,
+    mediaType: CallMediaType,
+    selectedUserIds: string[] = [],
+  ): Promise<CallView> {
     const client = await beginTransaction();
     try {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`criptsend:call:${conversationId}`]);
-      const conversation = await client.query<{ user_id: string }>(
-        `SELECT cm.user_id
+      const conversation = await client.query<{ user_id: string; type: 'DIRECT' | 'GROUP' }>(
+        `SELECT cm.user_id, c.type
          FROM ${schema}.conversations c
          JOIN ${schema}.conversation_members cm ON cm.conversation_id = c.id
          JOIN ${schema}.users u ON u.id = cm.user_id AND u.status = 'ACTIVE'
-         WHERE c.id = $1 AND c.type = 'DIRECT' AND cm.status = 'ACTIVE'
+         WHERE c.id = $1 AND cm.status = 'ACTIVE'
          ORDER BY cm.user_id
          FOR UPDATE OF c`,
         [conversationId],
       );
-      const participantUserIds = conversation.rows.map(({ user_id }) => user_id);
-      if (participantUserIds.length !== 2 || !participantUserIds.includes(userId)) {
+      const memberUserIds = conversation.rows.map(({ user_id }) => user_id);
+      const conversationType = conversation.rows[0]?.type;
+      if (!conversationType || !memberUserIds.includes(userId)) {
         throw new AppError(404, 'CONVERSATION_NOT_FOUND');
+      }
+      let participantUserIds: string[];
+      if (conversationType === 'DIRECT') {
+        if (memberUserIds.length !== 2) throw new AppError(404, 'CONVERSATION_NOT_FOUND');
+        participantUserIds = memberUserIds;
+      } else {
+        const selected = [...new Set(selectedUserIds)].filter((id) => id !== userId);
+        if (
+          selected.length === 0 ||
+          selected.length >= MAX_CALL_PARTICIPANTS ||
+          selected.some((id) => !memberUserIds.includes(id))
+        ) {
+          throw new AppError(400, 'INVALID_CALL_PARTICIPANTS');
+        }
+        participantUserIds = [userId, ...selected];
       }
       for (const participantUserId of participantUserIds) {
         await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`criptsend:call-user:${participantUserId}`]);
@@ -175,7 +194,7 @@ export class CallService {
     }
   }
 
-  async invite(userId: string, callId: string, phoneInput: string): Promise<CallView> {
+  async invite(userId: string, callId: string, nicknameInput: string): Promise<CallView> {
     const client = await beginTransaction();
     try {
       const callResult = await client.query<CallRow>(
@@ -199,20 +218,19 @@ export class CallService {
         throw new AppError(409, 'CALL_PARTICIPANT_LIMIT');
       }
 
+      const nickname = nicknameInput.trim().normalize('NFKC').replace(/^@/, '').toLowerCase();
+      if (!/^[a-z0-9][a-z0-9._-]{2,39}$/.test(nickname)) {
+        throw new AppError(400, 'INVALID_NICKNAME');
+      }
       const targetResult = await client.query<{ id: string }>(
         `SELECT target.id FROM ${schema}.users target
-         JOIN ${schema}.users actor ON actor.id = $2
-         WHERE target.phone_lookup_hash = $1 AND target.id <> $2
-           AND target.discoverable = TRUE AND target.status = 'ACTIVE'
-           AND (
-             actor.role <> 'MANAGER' OR target.manager_user_id = actor.id
-             OR (target.role = 'MANAGER' AND EXISTS (
-               SELECT 1 FROM ${schema}.manager_network_links link
-               WHERE link.manager_low_id = LEAST(actor.id, target.id)
-                 AND link.manager_high_id = GREATEST(actor.id, target.id)
-             ))
-           )`,
-        [createPhoneLookupHash(normalizePhone(phoneInput)), userId],
+         JOIN ${schema}.conversation_members member
+           ON member.user_id = target.id
+          AND member.conversation_id = $2
+          AND member.status = 'ACTIVE'
+         WHERE target.nickname = $1 AND target.id <> $3
+           AND target.status = 'ACTIVE'`,
+        [nickname, call.conversation_id, userId],
       );
       const targetUserId = targetResult.rows[0]?.id;
       if (!targetUserId) throw new AppError(404, 'CONTACT_NOT_FOUND');
@@ -358,27 +376,42 @@ export class CallService {
         if (!['RINGING', 'ACTIVE'].includes(call.status) || call.initiated_by_user_id === userId) throw new AppError(409, 'CALL_STATE_CONFLICT');
         await client.query(`UPDATE ${schema}.call_participants SET left_at = NOW() WHERE call_id = $1 AND user_id = $2`, [callId, userId]);
         if (call.status === 'RINGING') {
+          const remaining = await client.query<{ count: string }>(
+            `SELECT COUNT(*)::text AS count FROM ${schema}.call_participants
+             WHERE call_id = $1 AND user_id <> $2 AND left_at IS NULL`,
+            [callId, call.initiated_by_user_id],
+          );
+          if (Number(remaining.rows[0]?.count ?? 0) === 0) {
+            const changed = await client.query<CallRow>(
+              `UPDATE ${schema}.call_sessions SET status = 'DECLINED', ended_at = NOW() WHERE id = $1
+               RETURNING id, conversation_id, initiated_by_user_id, media_type, status, created_at, answered_at, ended_at`,
+              [callId],
+            );
+            updated = changed.rows[0] ?? call;
+          }
+        }
+        await addEvent(client, callId, userId, 'DECLINED');
+      } else {
+        if (!['RINGING', 'ACTIVE'].includes(call.status)) throw new AppError(409, 'CALL_STATE_CONFLICT');
+        await client.query(
+          `UPDATE ${schema}.call_participants
+           SET left_at = COALESCE(left_at, NOW())
+           WHERE call_id = $1 AND user_id = $2`,
+          [callId, userId],
+        );
+        const remaining = await client.query<{ count: string }>(
+          `SELECT COUNT(*)::text AS count FROM ${schema}.call_participants
+           WHERE call_id = $1 AND joined_at IS NOT NULL AND left_at IS NULL`,
+          [callId],
+        );
+        if (call.status === 'RINGING' || Number(remaining.rows[0]?.count ?? 0) < 2) {
           const changed = await client.query<CallRow>(
-            `UPDATE ${schema}.call_sessions SET status = 'DECLINED', ended_at = NOW() WHERE id = $1
+            `UPDATE ${schema}.call_sessions SET status = 'ENDED', ended_at = NOW() WHERE id = $1
              RETURNING id, conversation_id, initiated_by_user_id, media_type, status, created_at, answered_at, ended_at`,
             [callId],
           );
           updated = changed.rows[0] ?? call;
         }
-        await addEvent(client, callId, userId, 'DECLINED');
-      } else {
-        if (!['RINGING', 'ACTIVE'].includes(call.status)) throw new AppError(409, 'CALL_STATE_CONFLICT');
-        const changed = await client.query<CallRow>(
-          `UPDATE ${schema}.call_sessions SET status = 'ENDED', ended_at = NOW() WHERE id = $1
-           RETURNING id, conversation_id, initiated_by_user_id, media_type, status, created_at, answered_at, ended_at`,
-          [callId],
-        );
-        updated = changed.rows[0] ?? call;
-        await client.query(
-          `UPDATE ${schema}.call_participants
-           SET left_at = CASE WHEN joined_at IS NULL THEN left_at ELSE COALESCE(left_at, NOW()) END WHERE call_id = $1`,
-          [callId],
-        );
         await addEvent(client, callId, userId, 'ENDED');
       }
 
