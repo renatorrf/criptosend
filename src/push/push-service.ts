@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import webpush, { type PushSubscription } from 'web-push';
 
+import type { CallMediaType } from '../calls/call-service.js';
 import { env } from '../config/env.js';
 import { quoteIdentifier } from '../database/identifier.js';
 import { databasePool } from '../database/pool.js';
@@ -14,19 +15,27 @@ export function pushOpenUrl(path?: string): string {
   return new URL(path, env.PUSH_DEFAULT_OPEN_URL).toString();
 }
 
-export function activityNotification(kind: 'message' | 'call', callerName?: string) {
-  const name = kind === 'call' ? callerName?.replace(/[\p{Cc}\p{Cf}]/gu, '').trim().slice(0, 80) : '';
+type PushActivity =
+  | { kind: 'message' }
+  | { kind: 'call'; mediaType: CallMediaType; callerName: string | undefined };
+
+export function activityNotification(activity: PushActivity) {
+  const isCall = activity.kind === 'call';
+  const name = isCall ? activity.callerName?.replace(/[\p{Cc}\p{Cf}]/gu, '').trim().slice(0, 80) : '';
+  const title = isCall
+    ? (activity.mediaType === 'AUDIO' ? 'Chamada de áudio' : 'Chamada de vídeo')
+    : 'Nova mensagem';
   return {
     notification: {
-      title: 'Spotifi',
-      body: kind === 'message'
-        ? 'Abra o aplicativo para verificar.'
-        : name ? `${name} está te chamando.` : 'Você está recebendo uma chamada.',
+      title,
+      body: isCall
+        ? (name ? `${name} está te chamando.` : 'Abra o Spotifi para atender.')
+        : 'Abra o Spotifi para ler.',
       icon: pushOpenUrl('/assets/icon/icon-192x192.png'),
       badge: pushOpenUrl('/assets/icon/icon-96x96.png'),
-      tag: `spotifi-${kind}`,
+      tag: `spotifi-${activity.kind}`,
       renotify: true,
-      requireInteraction: kind === 'call',
+      requireInteraction: isCall,
       data: {
         onActionClick: {
           default: {
@@ -151,11 +160,20 @@ export class PushService {
   }
 
   async notifyNewMessage(recipientUserIds: string[]): Promise<void> {
-    await this.notifyUsers(recipientUserIds, activityNotification('message'), 300, 'spotifi-message');
+    await this.notifyUsers(recipientUserIds, activityNotification({ kind: 'message' }), 300, 'spotifi-message');
   }
 
-  async notifyIncomingCall(recipientUserIds: string[], callerName?: string): Promise<void> {
-    await this.notifyUsers(recipientUserIds, activityNotification('call', callerName), 90, 'spotifi-call');
+  async notifyIncomingCall(
+    recipientUserIds: string[],
+    mediaType: CallMediaType,
+    callerName?: string,
+  ): Promise<void> {
+    await this.notifyUsers(
+      recipientUserIds,
+      activityNotification({ kind: 'call', mediaType, callerName }),
+      90,
+      'spotifi-call',
+    );
   }
 
   async notifyTest(userId: string): Promise<PushDeliverySummary> {

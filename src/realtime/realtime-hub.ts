@@ -267,8 +267,9 @@ export class RealtimeHub {
               'call:incoming',
               { ...call },
             );
+            const caller = call.participants.find(({ userId }) => userId === auth.userId);
             void push
-              .notifyIncomingCall(recipients, call.participants.find(({ userId }) => userId === auth.userId)?.name)
+              .notifyIncomingCall(recipients, call.mediaType, caller?.name)
               .catch(() => undefined);
             acknowledge?.({ ok: true, call });
           })
@@ -287,7 +288,7 @@ export class RealtimeHub {
           .then(({ call, invitedUserId }) => {
             this.emitToUsers([invitedUserId], 'call:incoming', { ...call });
             const inviter = call.participants.find(({ userId }) => userId === auth.userId);
-            void push.notifyIncomingCall([invitedUserId], inviter?.name).catch(() => undefined);
+            void push.notifyIncomingCall([invitedUserId], call.mediaType, inviter?.name).catch(() => undefined);
             this.emitToUsers(this.joinedParticipantIds(call), 'call:accepted', {
               ...call,
               actionUserId: auth.userId,
