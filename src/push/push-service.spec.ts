@@ -18,11 +18,17 @@ describe('pushOpenUrl', () => {
 });
 
 describe('private push payload', () => {
-  it.each(['message', 'call'] as const)('sends a generic %s notification without participant or conversation IDs', (kind) => {
+  it.each(['message', 'call'] as const)('omits participant and conversation IDs from %s notifications', (kind) => {
     const { notification } = activityNotification(kind);
     expect(notification.title).toBe('Spotifi');
     expect(notification.tag).toBe(`spotifi-${kind}`);
     expect(notification.data.onActionClick.default.url).toBe(pushOpenUrl('/conversations'));
     expect(Object.keys(notification.data)).toEqual(['onActionClick']);
+  });
+
+  it('shows the caller name only in call notifications', () => {
+    expect(activityNotification('call', ' Ana Silva ').notification.body).toBe('Ana Silva está te chamando.');
+    expect(activityNotification('call').notification.body).toBe('Você está recebendo uma chamada.');
+    expect(activityNotification('message', 'Ana Silva').notification.body).toBe('Abra o aplicativo para verificar.');
   });
 });

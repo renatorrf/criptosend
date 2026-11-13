@@ -14,11 +14,14 @@ export function pushOpenUrl(path?: string): string {
   return new URL(path, env.PUSH_DEFAULT_OPEN_URL).toString();
 }
 
-export function activityNotification(kind: 'message' | 'call') {
+export function activityNotification(kind: 'message' | 'call', callerName?: string) {
+  const name = kind === 'call' ? callerName?.replace(/[\p{Cc}\p{Cf}]/gu, '').trim().slice(0, 80) : '';
   return {
     notification: {
       title: 'Spotifi',
-      body: kind === 'call' ? 'Abra o aplicativo para atender.' : 'Abra o aplicativo para verificar.',
+      body: kind === 'message'
+        ? 'Abra o aplicativo para verificar.'
+        : name ? `${name} está te chamando.` : 'Você está recebendo uma chamada.',
       icon: pushOpenUrl('/assets/icon/icon-192x192.png'),
       badge: pushOpenUrl('/assets/icon/icon-96x96.png'),
       tag: `spotifi-${kind}`,
@@ -151,8 +154,8 @@ export class PushService {
     await this.notifyUsers(recipientUserIds, activityNotification('message'), 300, 'spotifi-message');
   }
 
-  async notifyIncomingCall(recipientUserIds: string[]): Promise<void> {
-    await this.notifyUsers(recipientUserIds, activityNotification('call'), 90, 'spotifi-call');
+  async notifyIncomingCall(recipientUserIds: string[], callerName?: string): Promise<void> {
+    await this.notifyUsers(recipientUserIds, activityNotification('call', callerName), 90, 'spotifi-call');
   }
 
   async notifyTest(userId: string): Promise<PushDeliverySummary> {

@@ -268,7 +268,7 @@ export class RealtimeHub {
               { ...call },
             );
             void push
-              .notifyIncomingCall(recipients)
+              .notifyIncomingCall(recipients, call.participants.find(({ userId }) => userId === auth.userId)?.name)
               .catch(() => undefined);
             acknowledge?.({ ok: true, call });
           })
@@ -284,15 +284,10 @@ export class RealtimeHub {
           return;
         }
         void calls.invite(auth.userId, parsed.data.callId, parsed.data.nickname)
-          .then((call) => {
-            const previous = new Set(this.joinedParticipantIds(call));
-            const invited = call.participants.find(
-              ({ userId, joinedAt, leftAt }) => !previous.has(userId) && !joinedAt && !leftAt,
-            ) ?? [...call.participants].reverse().find(({ joinedAt, leftAt }) => !joinedAt && !leftAt);
-            if (invited) {
-              this.emitToUsers([invited.userId], 'call:incoming', { ...call });
-              void push.notifyIncomingCall([invited.userId]).catch(() => undefined);
-            }
+          .then(({ call, invitedUserId }) => {
+            this.emitToUsers([invitedUserId], 'call:incoming', { ...call });
+            const inviter = call.participants.find(({ userId }) => userId === auth.userId);
+            void push.notifyIncomingCall([invitedUserId], inviter?.name).catch(() => undefined);
             this.emitToUsers(this.joinedParticipantIds(call), 'call:accepted', {
               ...call,
               actionUserId: auth.userId,

@@ -175,13 +175,16 @@ export class ConversationService {
     }
   }
 
-  async createDirect(userId: string, nicknameInput: string): Promise<{ id: string }> {
-    const nickname = normalizeNickname(nicknameInput);
+  async createDirect(
+    userId: string,
+    target: { nickname: string } | { userId: string },
+  ): Promise<{ id: string }> {
+    const byId = 'userId' in target;
     const targetResult = await databasePool.query<{ id: string }>(
       `SELECT target.id
        FROM ${schema}.users target
        JOIN ${schema}.users actor ON actor.id = $2
-       WHERE target.nickname = $1
+       WHERE ${byId ? 'target.id' : 'target.nickname'} = $1
          AND target.id <> $2
          AND target.status = 'ACTIVE'
          AND (
@@ -198,7 +201,7 @@ export class ConversationService {
            )
          )
        LIMIT 1`,
-      [nickname, userId],
+      [byId ? target.userId : normalizeNickname(target.nickname), userId],
     );
     const targetUserId = targetResult.rows[0]?.id;
     if (!targetUserId) throw new AppError(404, 'CONTACT_NOT_FOUND');

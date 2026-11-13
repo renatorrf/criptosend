@@ -194,7 +194,11 @@ export class CallService {
     }
   }
 
-  async invite(userId: string, callId: string, nicknameInput: string): Promise<CallView> {
+  async invite(
+    userId: string,
+    callId: string,
+    nicknameInput: string,
+  ): Promise<{ call: CallView; invitedUserId: string }> {
     const client = await beginTransaction();
     try {
       const callResult = await client.query<CallRow>(
@@ -253,7 +257,7 @@ export class CallService {
       await addEvent(client, callId, userId, 'INVITED');
       const view = await mapCall(client, call);
       await client.query('COMMIT');
-      return view;
+      return { call: view, invitedUserId: targetUserId };
     } catch (error) {
       await client.query('ROLLBACK');
       if (typeof error === 'object' && error !== null && 'code' in error && error.code === '23505') {

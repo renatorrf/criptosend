@@ -8,7 +8,10 @@ import { ConversationService } from './conversation-service.js';
 
 const idParamsSchema = z.object({ id: z.uuid() }).strict();
 const nickname = z.string().trim().min(3).max(40);
-const directSchema = z.object({ nickname }).strict();
+const directSchema = z.union([
+  z.object({ nickname }).strict(),
+  z.object({ userId: z.uuid() }).strict(),
+]);
 const groupSchema = z.object({
   name: z.string().trim().min(2).max(80),
   nicknames: z.array(nickname).min(1).max(49),
@@ -38,7 +41,7 @@ export function registerConversationRoutes(
     if (!parsed.success) {
       throw new AppError(400, 'INVALID_REQUEST');
     }
-    const conversation = await conversations.createDirect(auth.userId, parsed.data.nickname);
+    const conversation = await conversations.createDirect(auth.userId, parsed.data);
     const memberIds = await conversations.listMemberUserIds(conversation.id);
     realtime.emitToUsers(memberIds, 'conversation:created', conversation);
     return reply.code(201).send(conversation);
