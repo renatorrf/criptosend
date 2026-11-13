@@ -78,8 +78,9 @@ que prepara a nova conta administrativa. O schema e as migrações são preserva
 O administrador gera um token para o gestor, que escolhe seu @usuário e sua
 senha no primeiro acesso. Após a ativação, o gestor aparece no painel com seu
 saldo de convites.
-Cada gestor recebe 10 vagas inicialmente e convida somente usuários da sua
-equipe. O convite de usuário reserva uma vaga por até 24 horas. O cadastro
+Cada gestor recebe 10 vagas inicialmente. O convite de usuário é um link de
+uso único, e o convidado escolhe seu @usuário e sua senha ao entrar na rede do
+gestor. O convite reserva uma vaga por até 24 horas. O cadastro
 consome a vaga, enquanto a expiração ou revogação libera a reserva.
 Os tokens são de uso único e somente seus hashes ficam no banco.
 

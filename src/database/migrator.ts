@@ -358,11 +358,11 @@ export async function verifyTables(): Promise<string[]> {
   const activationUsername = await databasePool.query(
     `SELECT 1 FROM information_schema.columns
      WHERE table_schema = $1 AND table_name = 'invitation_codes'
-       AND column_name = 'assigned_username'`,
+       AND column_name IN ('assigned_username', 'allows_username_choice')`,
     [env.SCHEMA],
   );
-  if (activationUsername.rowCount !== 1) {
-    throw new Error('The configured schema is missing named activation tokens.');
+  if (activationUsername.rowCount !== 2) {
+    throw new Error('The configured schema is missing invitation activation settings.');
   }
 
   const messageEnvelope = await databasePool.query(

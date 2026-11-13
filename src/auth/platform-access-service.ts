@@ -262,7 +262,7 @@ export class PlatformAccessService {
     }
     try {
       const invite = await this.findInvitation(databasePool, code);
-      if (invite.role === 'MANAGER' && invite.assigned_username === null) {
+      if (invite.assigned_username === null) {
         return { kind: 'INVITATION', chooseIdentity: true };
       }
       return { kind: 'INVITATION' };
@@ -405,7 +405,8 @@ export class PlatformAccessService {
               u.status AS creator_status
        FROM ${schema}.invitation_codes i
        JOIN ${schema}.users u ON u.id = i.created_by_user_id
-       WHERE i.code_hash = $1 AND (i.assigned_username IS NOT NULL OR (i.role = 'MANAGER' AND $3))
+       WHERE i.code_hash = $1
+         AND (i.assigned_username IS NOT NULL OR i.allows_username_choice OR (i.role = 'MANAGER' AND $3))
          AND ($2::text IS NULL OR i.assigned_username = $2 OR i.assigned_username IS NULL)
        ${lock ? 'FOR UPDATE OF i' : ''}`,
       [hashRefreshToken(code.trim()), username ?? null, unassignedManagerInvitationPattern.test(code.trim())],
@@ -437,12 +438,9 @@ export class PlatformAccessService {
     if (!canCreateInvitation(actorRow.role, role)) {
       throw new AppError(403, 'FORBIDDEN');
     }
-    if (role === 'USER' && usernameInput === undefined) {
-      throw new AppError(400, 'INVALID_USERNAME');
-    }
     const username = usernameInput === undefined ? null : normalizePlatformUsername(usernameInput);
     const id = randomUUID();
-    const code = `${username === null ? 'cm' : 'cs'}_${randomBytes(24).toString('base64url')}`;
+    const code = `${username === null && role === 'MANAGER' ? 'cm' : 'cs'}_${randomBytes(24).toString('base64url')}`;
     const ttlHours = role === 'USER' ? MANAGER_INVITATION_TTL_HOURS : expiresInHours;
     const client = await beginTransaction();
     try {
@@ -459,7 +457,7 @@ export class PlatformAccessService {
         );
         if (reservedUsername.rowCount) throw new AppError(409, 'USERNAME_ALREADY_EXISTS');
       }
-      if (role === 'USER') {
+      if (role === 'USER' && username !== null) {
         const existingNickname = await client.query(
           `SELECT 1 FROM ${schema}.users
            WHERE COALESCE(manager_user_id, id) = $1 AND nickname = $2`,
@@ -481,7 +479,7 @@ export class PlatformAccessService {
            FROM ${schema}.invitation_codes
            WHERE created_by_user_id = $1
              AND role = 'USER'
-             AND assigned_username IS NOT NULL
+             AND (assigned_username IS NOT NULL OR allows_username_choice)
              AND used_at IS NULL
              AND revoked_at IS NULL
              AND expires_at > clock_timestamp()`,
@@ -495,11 +493,11 @@ export class PlatformAccessService {
       }
       const inserted = await client.query<{ expires_at: Date }>(
         `INSERT INTO ${schema}.invitation_codes
-           (id, code_hash, role, created_by_user_id, expires_at, assigned_username, created_at)
-         SELECT $1, $2, $3, $4, issued_at + $5 * INTERVAL '1 hour', $6, issued_at
+           (id, code_hash, role, created_by_user_id, expires_at, assigned_username, created_at, allows_username_choice)
+         SELECT $1, $2, $3, $4, issued_at + $5 * INTERVAL '1 hour', $6, issued_at, $7
          FROM (SELECT clock_timestamp() AS issued_at) issuance
          RETURNING expires_at`,
-        [id, hashRefreshToken(code), role, actor.userId, ttlHours, username],
+        [id, hashRefreshToken(code), role, actor.userId, ttlHours, username, username === null],
       );
       const invitation = inserted.rows[0];
       if (!invitation) throw new Error('Invitation expiration was not returned.');
@@ -520,13 +518,14 @@ export class PlatformAccessService {
       id: string;
       role: string;
       assigned_username: string | null;
+      allows_username_choice: boolean;
       created_at: Date;
       expires_at: Date;
       used_at: Date | null;
       revoked_at: Date | null;
     }>(
       `SELECT i.id, i.role, COALESCE(i.assigned_username, u.username) AS assigned_username,
-              i.created_at, i.expires_at, i.used_at, i.revoked_at
+              i.created_at, i.expires_at, i.used_at, i.revoked_at, i.allows_username_choice
        FROM ${schema}.invitation_codes i
        LEFT JOIN ${schema}.users u ON u.id = i.used_by_user_id
        WHERE i.created_by_user_id = $1 AND i.role = $2
@@ -543,7 +542,7 @@ export class PlatformAccessService {
         ? 'REVOKED'
         : invite.used_at
           ? 'USED'
-          : (invite.role === 'USER' && !invite.assigned_username) || invite.expires_at.getTime() <= Date.now()
+          : (invite.role === 'USER' && !invite.assigned_username && !invite.allows_username_choice) || invite.expires_at.getTime() <= Date.now()
             ? 'EXPIRED'
             : 'ACTIVE',
     }));
@@ -586,7 +585,7 @@ export class PlatformAccessService {
              FROM ${schema}.invitation_codes i
              WHERE i.created_by_user_id = u.id
                AND i.role = 'USER'
-               AND i.assigned_username IS NOT NULL
+               AND (i.assigned_username IS NOT NULL OR i.allows_username_choice)
                AND i.used_at IS NULL
                AND i.revoked_at IS NULL
                AND i.expires_at > NOW()
@@ -793,7 +792,7 @@ export class PlatformAccessService {
        LEFT JOIN ${schema}.invitation_codes i
          ON i.created_by_user_id = b.manager_user_id
         AND i.role = 'USER'
-        AND i.assigned_username IS NOT NULL
+        AND (i.assigned_username IS NOT NULL OR i.allows_username_choice)
         AND i.used_at IS NULL
         AND i.revoked_at IS NULL
         AND i.expires_at > NOW()

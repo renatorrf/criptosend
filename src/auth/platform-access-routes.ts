@@ -41,8 +41,7 @@ const invitationSchema = z
     username: username.optional(),
     expiresInHours: z.number().int().min(1).max(24 * 30).default(72),
   })
-  .strict()
-  .refine((body) => body.role === 'MANAGER' || body.username !== undefined);
+  .strict();
 const statusSchema = z.object({ status: z.enum(['ACTIVE', 'SUSPENDED']) }).strict();
 const creditGrantSchema = z.object({ amount: z.number().int().min(1).max(1000) }).strict();
 const managerLookupSchema = z.object({ username }).strict();

@@ -29,6 +29,10 @@ interface MessageRow {
   deletion_reason: 'USER' | 'EXPIRED' | null;
 }
 
+interface ListedMessageRow extends MessageRow {
+  cursor_created_at: string;
+}
+
 export interface CreateMessageInput {
   clientMessageId: string;
   ciphertext: Buffer;
@@ -62,7 +66,7 @@ function mapMessage(row: MessageRow): Record<string, unknown> {
   };
 }
 
-function decodeCursor(cursor: string | undefined): { createdAt: Date; id: string } | null {
+function decodeCursor(cursor: string | undefined): { createdAt: string; id: string } | null {
   if (!cursor) {
     return null;
   }
@@ -70,15 +74,15 @@ function decodeCursor(cursor: string | undefined): { createdAt: Date; id: string
     const parsed = cursorSchema.parse(
       JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')),
     );
-    return { createdAt: new Date(parsed.createdAt), id: parsed.id };
+    return parsed;
   } catch {
     throw new AppError(400, 'INVALID_CURSOR');
   }
 }
 
-function encodeCursor(row: MessageRow): string {
+function encodeCursor(row: ListedMessageRow): string {
   return Buffer.from(
-    JSON.stringify({ createdAt: row.created_at.toISOString(), id: row.id }),
+    JSON.stringify({ createdAt: row.cursor_created_at, id: row.id }),
     'utf8',
   ).toString('base64url');
 }
@@ -94,10 +98,11 @@ export class MessageService {
   ): Promise<{ messages: Record<string, unknown>[]; nextCursor: string | null }> {
     await this.conversations.assertMember(userId, conversationId);
     const cursor = decodeCursor(cursorValue);
-    const result = await databasePool.query<MessageRow>(
+    const result = await databasePool.query<ListedMessageRow>(
       `SELECT id, conversation_id, sender_user_id, sender_device_id,
               client_message_id, ciphertext, crypto_header, envelope_at_rest, reply_to_message_id,
-              created_at, expires_at, deleted_at, deletion_reason
+              created_at, expires_at, deleted_at, deletion_reason,
+              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at
        FROM ${schema}.messages
        WHERE conversation_id = $1
          AND created_at > COALESCE(
