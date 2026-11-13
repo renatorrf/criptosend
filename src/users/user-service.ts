@@ -34,12 +34,12 @@ export class UserService {
        FROM ${schema}.users target
        JOIN ${schema}.users actor ON actor.id = $1
        WHERE target.id <> $1
+         AND actor.role <> 'PLATFORM_ADMIN'
          AND target.status = 'ACTIVE'
          AND (
            ($2 = 'managed' AND actor.role = 'MANAGER' AND target.manager_user_id = actor.id)
            OR ($2 = 'network' AND (
-             actor.role = 'PLATFORM_ADMIN'
-             OR COALESCE(target.manager_user_id, target.id) =
+             COALESCE(target.manager_user_id, target.id) =
                 COALESCE(actor.manager_user_id, actor.id)
              OR (
                actor.role = 'MANAGER'
@@ -99,6 +99,7 @@ export class UserService {
        FROM ${schema}.users target
        JOIN ${schema}.users actor ON actor.id = $2
        WHERE target.nickname = $1
+         AND actor.role <> 'PLATFORM_ADMIN'
          AND target.id <> $2
          AND target.status = 'ACTIVE'
          AND (

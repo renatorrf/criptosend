@@ -60,16 +60,26 @@ Recibos de leitura e indicadores de digitação ficam desativados por padrão e 
 
 ## Cadastro e recuperação
 
-O administrador da plataforma é criado uma única vez por operação segura:
+Para preparar o primeiro acesso do administrador:
 
 ```powershell
 npm run admin:bootstrap -- admin "Administrador da plataforma"
 ```
 
-O comando imprime a senha inicial somente na criação. O administrador gera
-convites de gestor; cada gestor gera convites de usuário. Convites expiram,
-são de uso único e somente o hash do código fica armazenado. Novos usuários
-definem usuário, senha principal e senha mestra durante a ativação.
+O comando imprime um token de uso único válido por 24 horas e uma sugestão de
+senha. Na opção **Primeiro acesso**, informe o token, o usuário e a senha que
+deseja cadastrar. Um administrador com ativação pendente pode receber outro
+token executando o mesmo comando. Um administrador já ativado permanece intacto.
+
+A opção `--reset-existing` remove todas as contas e os dados operacionais do
+schema configurado, incluindo conversas, sessões e convites, na mesma transação
+que prepara a nova conta administrativa. O schema e as migrações são preservados.
+
+O administrador convida gestores e acompanha o saldo de cada gestor ativado.
+Cada gestor recebe 10 vagas inicialmente e convida somente usuários da sua
+equipe. O convite de usuário reserva uma vaga por até 24 horas. O cadastro
+consome a vaga, enquanto a expiração ou revogação libera a reserva.
+Os tokens são de uso único e somente seus hashes ficam no banco.
 
 O fluxo telefônico abaixo é legado e fica disponível apenas para migração:
 
@@ -80,27 +90,10 @@ npm run admin:migrate-phone-user -- 34999999999 teste.9999
 Esse comando preserva a conta, o telefone e o histórico, atribui um usuário e
 imprime uma senha temporária. Sessões antigas são encerradas.
 
-O fluxo unificado recebe nome e telefone, envia um código e somente revela se a
-próxima etapa é entrada ou cadastro depois que o número foi confirmado. Novas
-contas criam uma senha principal, uma senha mestra e o primeiro dispositivo.
-
-A senha mestra nunca é enviada à API. O cliente usa Argon2id para derivar uma
-chave AES-GCM que envolve uma chave privada de recuperação. Para trocar a senha
-principal, o cliente desbloqueia essa chave e assina um desafio efêmero; o
-backend valida a assinatura pela chave pública cadastrada e revoga as sessões
-anteriores.
-
-Quando a senha mestra também foi perdida, o usuário abre uma solicitação
-administrativa. A aprovação deve ocorrer somente depois da conferência de
-identidade pelo operador:
-
-```powershell
-npm run admin:approve-reset -- <request-id> <identificacao-do-operador>
-```
-
-O operador não recebe nem define senhas. A conclusão revoga todos os dispositivos
-e sessões anteriores, cria novas identidades e registra auditoria. Conteúdo que
-dependa exclusivamente das chaves antigas pode permanecer inacessível.
+Para redefinir o acesso, o gestor gera um novo token para um usuário da sua
+equipe. O administrador pode fazer o mesmo para um gestor. A pessoa usa
+**Primeiro acesso** para escolher outra senha. A redefinição encerra as sessões,
+limpa o histórico da conta e preserva seus vínculos com a rede.
 
 ## Chamadas de vídeo
 

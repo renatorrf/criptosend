@@ -24,6 +24,7 @@ import {
 
 const schema = quoteIdentifier(env.SCHEMA);
 const ACCESS_RESET_TTL_SECONDS = 24 * 60 * 60;
+const MANAGER_INVITATION_TTL_HOURS = 24;
 const accessResetTokenPattern = /^ar_([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})_[A-Za-z0-9_-]{43}$/;
 
 export type PlatformRole = 'PLATFORM_ADMIN' | 'MANAGER' | 'USER';
@@ -71,7 +72,7 @@ export function canCreateInvitation(
 ): boolean {
   return targetRole === 'MANAGER'
     ? actorRole === 'PLATFORM_ADMIN'
-    : actorRole === 'PLATFORM_ADMIN' || actorRole === 'MANAGER';
+    : actorRole === 'MANAGER';
 }
 
 export function managerPair(left: string, right: string): [string, string] {
@@ -236,16 +237,17 @@ export class PlatformAccessService {
     await this.findInvitation(databasePool, code, username);
   }
 
-  async verifyAccessToken(code: string): Promise<{ kind: 'INVITATION' | 'RESET' }> {
+  async verifyAccessToken(code: string): Promise<{ kind: 'INVITATION' | 'RESET' | 'ADMIN_SETUP' }> {
     const selector = accessResetTokenPattern.exec(code)?.[1];
     if (selector) {
-      const result = await databasePool.query<{ token_hash: string; locked_until: Date | null }>(
-        `SELECT t.token_hash, c.locked_until
+      const result = await databasePool.query<{ token_hash: string; locked_until: Date | null; role: PlatformRole }>(
+        `SELECT t.token_hash, c.locked_until, u.role
          FROM ${schema}.user_access_reset_tokens t
          JOIN ${schema}.users u ON u.id = t.user_id AND u.status = 'ACTIVE'
          JOIN ${schema}.user_credentials c ON c.user_id = u.id
          WHERE t.id = $1::uuid AND t.consumed_at IS NULL AND t.expires_at > NOW()
-           AND c.reset_reason = 'MANAGER_REQUEST'`,
+           AND c.reset_reason = 'MANAGER_REQUEST'
+           AND (u.role <> 'PLATFORM_ADMIN' OR t.created_by_user_id = u.id)`,
         [selector],
       );
       const token = result.rows[0];
@@ -253,7 +255,7 @@ export class PlatformAccessService {
         throw new AppError(400, 'INVALID_ACCESS_TOKEN');
       }
       assertLoginNotLocked(token?.locked_until);
-      return { kind: 'RESET' };
+      return { kind: token?.role === 'PLATFORM_ADMIN' ? 'ADMIN_SETUP' : 'RESET' };
     }
     try {
       await this.findInvitation(databasePool, code);
@@ -274,6 +276,7 @@ export class PlatformAccessService {
     const username = normalizePlatformUsername(usernameInput);
     const client = await beginTransaction();
     try {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [username]);
       const invite = await this.findInvitation(client, code, username, true);
       const existing = await client.query(
         `SELECT 1 FROM ${schema}.users WHERE username = $1`,
@@ -336,11 +339,13 @@ export class PlatformAccessService {
         [userId, await hashPassword(password)],
       );
       const deviceId = await insertDevice(client, userId, device);
-      await client.query(
+      const redeemed = await client.query(
         `UPDATE ${schema}.invitation_codes
-         SET used_by_user_id = $2, used_at = NOW() WHERE id = $1`,
+         SET used_by_user_id = $2, used_at = clock_timestamp()
+         WHERE id = $1 AND expires_at > clock_timestamp()`,
         [invite.id, userId],
       );
+      if (redeemed.rowCount !== 1) throw new AppError(400, 'INVALID_OR_EXPIRED_INVITATION');
       const session = await createSession(client, userId, deviceId);
       await recordEvent(client, 'INVITATION_REDEEMED', requestId, userId, deviceId);
       await client.query('COMMIT');
@@ -379,11 +384,11 @@ export class PlatformAccessService {
       created_by_user_id: string;
       creator_role: PlatformRole;
       creator_status: string;
-      expires_at: Date;
+      expired: boolean;
       used_at: Date | null;
       revoked_at: Date | null;
     }>(
-      `SELECT i.id, i.role, i.created_by_user_id, i.expires_at,
+      `SELECT i.id, i.role, i.created_by_user_id, i.expires_at <= clock_timestamp() AS expired,
               i.used_at, i.revoked_at, u.role AS creator_role,
               u.status AS creator_status
        FROM ${schema}.invitation_codes i
@@ -396,14 +401,12 @@ export class PlatformAccessService {
     const invite = inviteResult.rows[0];
     const creatorCanInvite =
       invite?.creator_status === 'ACTIVE' &&
-      ((invite.role === 'MANAGER' && invite.creator_role === 'PLATFORM_ADMIN') ||
-        (invite.role === 'USER' &&
-          (invite.creator_role === 'PLATFORM_ADMIN' || invite.creator_role === 'MANAGER')));
+      canCreateInvitation(invite.creator_role, invite.role);
     if (
       !invite ||
       invite.used_at ||
       invite.revoked_at ||
-      invite.expires_at.getTime() <= Date.now() ||
+      invite.expired ||
       !creatorCanInvite
     ) {
       throw new AppError(400, 'INVALID_OR_EXPIRED_INVITATION');
@@ -425,7 +428,7 @@ export class PlatformAccessService {
     }
     const id = randomUUID();
     const code = `cs_${randomBytes(24).toString('base64url')}`;
-    const expiresAt = new Date(Date.now() + expiresInHours * 60 * 60 * 1_000);
+    const ttlHours = role === 'USER' ? MANAGER_INVITATION_TTL_HOURS : expiresInHours;
     const client = await beginTransaction();
     try {
       // Serialize reservations for this username, including requests from different managers.
@@ -435,7 +438,7 @@ export class PlatformAccessService {
          UNION ALL
          SELECT 1 FROM ${schema}.invitation_codes
          WHERE assigned_username = $1 AND used_at IS NULL
-           AND revoked_at IS NULL AND expires_at > NOW()`,
+           AND revoked_at IS NULL AND expires_at > clock_timestamp()`,
         [username],
       );
       if (reservedUsername.rowCount) throw new AppError(409, 'USERNAME_ALREADY_EXISTS');
@@ -464,7 +467,7 @@ export class PlatformAccessService {
              AND assigned_username IS NOT NULL
              AND used_at IS NULL
              AND revoked_at IS NULL
-             AND expires_at > NOW()`,
+             AND expires_at > clock_timestamp()`,
           [actor.userId],
         );
         const available = balance.rows[0]?.available_credits ?? 0;
@@ -473,15 +476,19 @@ export class PlatformAccessService {
           throw new AppError(409, 'INVITATION_QUOTA_EXHAUSTED');
         }
       }
-      await client.query(
+      const inserted = await client.query<{ expires_at: Date }>(
         `INSERT INTO ${schema}.invitation_codes
-           (id, code_hash, role, created_by_user_id, expires_at, assigned_username)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [id, hashRefreshToken(code), role, actor.userId, expiresAt, username],
+           (id, code_hash, role, created_by_user_id, expires_at, assigned_username, created_at)
+         SELECT $1, $2, $3, $4, issued_at + $5 * INTERVAL '1 hour', $6, issued_at
+         FROM (SELECT clock_timestamp() AS issued_at) issuance
+         RETURNING expires_at`,
+        [id, hashRefreshToken(code), role, actor.userId, ttlHours, username],
       );
+      const invitation = inserted.rows[0];
+      if (!invitation) throw new Error('Invitation expiration was not returned.');
       await recordEvent(client, 'INVITATION_CREATED', requestId, actor.userId, actor.deviceId);
       await client.query('COMMIT');
-      return { id, code, username, expiresAt, role };
+      return { id, code, username, expiresAt: invitation.expires_at, role };
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
@@ -491,7 +498,7 @@ export class PlatformAccessService {
   }
 
   async listInvitations(actor: AuthContext): Promise<Array<Record<string, unknown>>> {
-    await this.assertManagementRole(actor.userId);
+    const actorRow = await this.assertManagementRole(actor.userId);
     const result = await databasePool.query<{
       id: string;
       role: string;
@@ -503,9 +510,9 @@ export class PlatformAccessService {
     }>(
       `SELECT id, role, assigned_username, created_at, expires_at, used_at, revoked_at
        FROM ${schema}.invitation_codes
-       WHERE created_by_user_id = $1
+       WHERE created_by_user_id = $1 AND role = $2
        ORDER BY created_at DESC LIMIT 100`,
-      [actor.userId],
+      [actor.userId, actorRow.role === 'PLATFORM_ADMIN' ? 'MANAGER' : 'USER'],
     );
     return result.rows.map((invite) => ({
       id: invite.id,
@@ -524,13 +531,13 @@ export class PlatformAccessService {
   }
 
   async revokeInvitation(actor: AuthContext, invitationId: string): Promise<void> {
-    await this.assertManagementRole(actor.userId);
+    const actorRow = await this.assertManagementRole(actor.userId);
     const result = await databasePool.query(
       `UPDATE ${schema}.invitation_codes
        SET revoked_at = NOW()
-       WHERE id = $1 AND created_by_user_id = $2
+       WHERE id = $1 AND created_by_user_id = $2 AND role = $3
          AND used_at IS NULL AND revoked_at IS NULL`,
-      [invitationId, actor.userId],
+      [invitationId, actor.userId, actorRow.role === 'PLATFORM_ADMIN' ? 'MANAGER' : 'USER'],
     );
     if (result.rowCount !== 1) throw new AppError(404, 'INVITATION_NOT_FOUND');
   }
@@ -543,46 +550,36 @@ export class PlatformAccessService {
       name_encrypted: Buffer;
       role: PlatformRole;
       status: string;
-      phone_encrypted: Buffer | null;
-      created_at: Date;
-      available_credits: number | null;
-      consumed_credits: number | null;
-      active_invitations: number | null;
+      remaining_invitations: number | null;
+      next_expiration_at: Date | null;
       reset_required_at: Date | null;
-      recovery_token_configured: boolean;
     }>(
       actorRow.role === 'PLATFORM_ADMIN'
         ? `SELECT u.id, u.username, u.name_encrypted, u.role, u.status,
-                  u.phone_encrypted, u.created_at,
                   c.reset_required_at,
-                  EXISTS (
-                    SELECT 1 FROM ${schema}.user_access_reset_tokens token
-                    WHERE token.user_id = u.id AND token.consumed_at IS NULL AND token.expires_at > NOW()
-                  ) AS recovery_token_configured,
-                  COALESCE(b.available_credits, 0) AS available_credits,
-                  COALESCE(b.consumed_credits, 0) AS consumed_credits,
-                  (SELECT COUNT(*)::INTEGER
-                   FROM ${schema}.invitation_codes i
-                   WHERE i.created_by_user_id = u.id
-                     AND i.role = 'USER'
-                     AND i.assigned_username IS NOT NULL
-                     AND i.used_at IS NULL
-                     AND i.revoked_at IS NULL
-                     AND i.expires_at > NOW()) AS active_invitations
+                  GREATEST(0, COALESCE(b.available_credits, 0) - pending.count) AS remaining_invitations,
+                  pending.next_expiration_at
            FROM ${schema}.users u
            JOIN ${schema}.user_credentials c ON c.user_id = u.id
            LEFT JOIN ${schema}.manager_invitation_balances b ON b.manager_user_id = u.id
+           CROSS JOIN LATERAL (
+             SELECT COUNT(*)::INTEGER AS count, MIN(i.expires_at) AS next_expiration_at
+             FROM ${schema}.invitation_codes i
+             WHERE i.created_by_user_id = u.id
+               AND i.role = 'USER'
+               AND i.assigned_username IS NOT NULL
+               AND i.used_at IS NULL
+               AND i.revoked_at IS NULL
+               AND i.expires_at > NOW()
+           ) pending
            WHERE u.role = 'MANAGER' ORDER BY u.created_at DESC`
         : `SELECT u.id, u.username, u.name_encrypted, u.role, u.status,
-                  u.phone_encrypted, u.created_at,
                   c.reset_required_at,
-                  FALSE AS recovery_token_configured,
-                  NULL::INTEGER AS available_credits,
-                  NULL::INTEGER AS consumed_credits,
-                  NULL::INTEGER AS active_invitations
+                  NULL::INTEGER AS remaining_invitations,
+                  NULL::TIMESTAMPTZ AS next_expiration_at
            FROM ${schema}.users u
            JOIN ${schema}.user_credentials c ON c.user_id = u.id
-           WHERE u.manager_user_id = $1 ORDER BY u.created_at DESC`,
+           WHERE u.manager_user_id = $1 AND u.role = 'USER' ORDER BY u.created_at DESC`,
       actorRow.role === 'PLATFORM_ADMIN' ? [] : [actor.userId],
     );
     return result.rows.map((user) => ({
@@ -591,15 +588,11 @@ export class PlatformAccessService {
       name: decryptField(user.name_encrypted, 'user-name'),
       role: user.role,
       status: user.status,
-      hasPhone: user.phone_encrypted !== null,
-      createdAt: user.created_at,
       resetRequired: user.reset_required_at !== null,
-      recoveryTokenConfigured: user.recovery_token_configured,
-      ...(user.available_credits !== null
+      ...(user.remaining_invitations !== null
         ? {
-            availableCredits: user.available_credits,
-            consumedCredits: user.consumed_credits ?? 0,
-            activeInvitations: user.active_invitations ?? 0,
+            remainingInvitations: user.remaining_invitations,
+            nextExpirationAt: user.next_expiration_at,
           }
         : {}),
     }));
@@ -714,13 +707,14 @@ export class PlatformAccessService {
       const user = userResult.rows[0];
       assertLoginNotLocked(user?.locked_until);
       const selector = accessResetTokenPattern.exec(token)?.[1];
-      const reset = user?.reset_required_at && user.role !== 'PLATFORM_ADMIN'
+      const reset = user?.reset_required_at && (user.role !== 'PLATFORM_ADMIN' || selector)
         ? (await client.query<{ id: string; token_hash: string }>(
           `SELECT id, token_hash FROM ${schema}.user_access_reset_tokens
            WHERE user_id = $1 AND consumed_at IS NULL AND expires_at > NOW()
              AND ($2::uuid IS NULL OR id = $2)
+             AND (NOT $3 OR created_by_user_id = user_id)
            FOR UPDATE`,
-          [user.id, selector ?? null],
+          [user.id, selector ?? null, user.role === 'PLATFORM_ADMIN'],
         )).rows[0] : undefined;
       const valid = await verifyPassword(reset?.token_hash, token.trim());
       if (!user || !reset || !valid) throw new AppError(401, 'INVALID_RESET_TOKEN');
@@ -764,6 +758,7 @@ export class PlatformAccessService {
     availableCredits: number;
     consumedCredits: number;
     activeInvitations: number;
+    nextExpirationAt: Date | null;
   }> {
     const actorRow = await this.actor(actor.userId);
     if (actorRow.role !== 'MANAGER') throw new AppError(403, 'FORBIDDEN');
@@ -771,9 +766,10 @@ export class PlatformAccessService {
       available_credits: number;
       consumed_credits: number;
       active_invitations: number;
+      next_expiration_at: Date | null;
     }>(
       `SELECT b.available_credits, b.consumed_credits,
-              COUNT(i.id)::INTEGER AS active_invitations
+              COUNT(i.id)::INTEGER AS active_invitations, MIN(i.expires_at) AS next_expiration_at
        FROM ${schema}.manager_invitation_balances b
        LEFT JOIN ${schema}.invitation_codes i
          ON i.created_by_user_id = b.manager_user_id
@@ -792,6 +788,7 @@ export class PlatformAccessService {
       availableCredits: balance.available_credits,
       consumedCredits: balance.consumed_credits,
       activeInvitations: balance.active_invitations,
+      nextExpirationAt: balance.next_expiration_at,
     };
   }
 
@@ -1117,18 +1114,14 @@ export class PlatformAccessService {
     status: 'ACTIVE' | 'SUSPENDED',
   ): Promise<void> {
     if (targetUserId === actor.userId) throw new AppError(403, 'FORBIDDEN');
-    const actorRow = await this.assertManagementRole(actor.userId);
+    const actorRow = await this.actor(actor.userId);
+    if (actorRow.role !== 'MANAGER') throw new AppError(403, 'FORBIDDEN');
     const client = await beginTransaction();
     try {
       const result = await client.query(
-        actorRow.role === 'PLATFORM_ADMIN'
-          ? `UPDATE ${schema}.users SET status = $2
-             WHERE id = $1 AND role = 'MANAGER'`
-          : `UPDATE ${schema}.users SET status = $2
-             WHERE id = $1 AND role = 'USER' AND manager_user_id = $3`,
-        actorRow.role === 'PLATFORM_ADMIN'
-          ? [targetUserId, status]
-          : [targetUserId, status, actor.userId],
+        `UPDATE ${schema}.users SET status = $2
+         WHERE id = $1 AND role = 'USER' AND manager_user_id = $3`,
+        [targetUserId, status, actor.userId],
       );
       if (result.rowCount !== 1) throw new AppError(404, 'USER_NOT_FOUND');
       if (status === 'SUSPENDED') {

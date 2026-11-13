@@ -21,7 +21,7 @@ describe('platform access policy', () => {
 
   it('enforces the invitation hierarchy', () => {
     expect(canCreateInvitation('PLATFORM_ADMIN', 'MANAGER')).toBe(true);
-    expect(canCreateInvitation('PLATFORM_ADMIN', 'USER')).toBe(true);
+    expect(canCreateInvitation('PLATFORM_ADMIN', 'USER')).toBe(false);
     expect(canCreateInvitation('MANAGER', 'MANAGER')).toBe(false);
     expect(canCreateInvitation('MANAGER', 'USER')).toBe(true);
     expect(canCreateInvitation('USER', 'USER')).toBe(false);
