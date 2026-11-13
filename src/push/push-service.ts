@@ -14,6 +14,28 @@ export function pushOpenUrl(path?: string): string {
   return new URL(path, env.PUSH_DEFAULT_OPEN_URL).toString();
 }
 
+export function activityNotification(kind: 'message' | 'call') {
+  return {
+    notification: {
+      title: 'Spotifi',
+      body: kind === 'call' ? 'Abra o aplicativo para atender.' : 'Abra o aplicativo para verificar.',
+      icon: pushOpenUrl('/assets/icon/icon-192x192.png'),
+      badge: pushOpenUrl('/assets/icon/icon-96x96.png'),
+      tag: `spotifi-${kind}`,
+      renotify: true,
+      requireInteraction: kind === 'call',
+      data: {
+        onActionClick: {
+          default: {
+            operation: 'navigateLastFocusedOrOpen',
+            url: pushOpenUrl('/conversations'),
+          },
+        },
+      },
+    },
+  };
+}
+
 interface SubscriptionRow {
   id: string;
   endpoint_encrypted: Buffer;
@@ -125,57 +147,12 @@ export class PushService {
     );
   }
 
-  async notifyNewMessage(
-    recipientUserIds: string[],
-    conversationId: string,
-  ): Promise<void> {
-    await this.notifyUsers(recipientUserIds, {
-      notification: {
-        title: 'Spotifi',
-        body: 'Você recebeu uma nova mensagem.',
-        icon: pushOpenUrl('/assets/icon/icon-192x192.png'),
-        badge: pushOpenUrl('/assets/icon/icon-96x96.png'),
-        tag: `conversation-${conversationId}`,
-        renotify: true,
-        data: {
-          onActionClick: {
-            default: {
-              operation: 'navigateLastFocusedOrOpen',
-              url: pushOpenUrl(`/conversations/${encodeURIComponent(conversationId)}`),
-            },
-          },
-        },
-      },
-    }, 300, `conversation-${conversationId}`);
+  async notifyNewMessage(recipientUserIds: string[]): Promise<void> {
+    await this.notifyUsers(recipientUserIds, activityNotification('message'), 300, 'spotifi-message');
   }
 
-  async notifyIncomingCall(
-    recipientUserIds: string[],
-    conversationId: string,
-    callId: string,
-    mediaType: 'AUDIO' | 'VIDEO',
-  ): Promise<void> {
-    await this.notifyUsers(recipientUserIds, {
-      notification: {
-        title: mediaType === 'AUDIO' ? 'Chamada de áudio' : 'Chamada de vídeo',
-        body: 'Você está recebendo uma chamada no Spotifi.',
-        icon: pushOpenUrl('/assets/icon/icon-192x192.png'),
-        badge: pushOpenUrl('/assets/icon/icon-96x96.png'),
-        tag: `call-${callId}`,
-        renotify: true,
-        requireInteraction: true,
-        data: {
-          callId,
-          conversationId,
-          onActionClick: {
-            default: {
-              operation: 'navigateLastFocusedOrOpen',
-              url: pushOpenUrl('/conversations'),
-            },
-          },
-        },
-      },
-    }, 300, `call-${callId}`);
+  async notifyIncomingCall(recipientUserIds: string[]): Promise<void> {
+    await this.notifyUsers(recipientUserIds, activityNotification('call'), 90, 'spotifi-call');
   }
 
   async notifyTest(userId: string): Promise<PushDeliverySummary> {
@@ -185,7 +162,7 @@ export class PushService {
         body: 'As notificações estão funcionando neste dispositivo.',
         icon: pushOpenUrl('/assets/icon/icon-192x192.png'),
         badge: pushOpenUrl('/assets/icon/icon-96x96.png'),
-        tag: `push-test-${userId}`,
+        tag: 'spotifi-test',
         renotify: false,
         data: {
           onActionClick: {
@@ -196,7 +173,7 @@ export class PushService {
           },
         },
       },
-    }, 300, `push-test-${userId}`);
+    }, 300, 'spotifi-test');
   }
 
   private async notifyUsers(

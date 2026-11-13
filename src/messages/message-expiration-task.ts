@@ -6,6 +6,7 @@ import type { MessageService } from './message-service.js';
 
 export class MessageExpirationTask {
   private timer: NodeJS.Timeout | null = null;
+  private running = false;
 
   constructor(
     private readonly messages: MessageService,
@@ -29,6 +30,8 @@ export class MessageExpirationTask {
   }
 
   private async run(): Promise<void> {
+    if (this.running) return;
+    this.running = true;
     try {
       const expired = await this.messages.expireDue();
       for (const message of expired) {
@@ -46,6 +49,13 @@ export class MessageExpirationTask {
         { err: { name: error instanceof Error ? error.name : 'Error' } },
         'MESSAGE_EXPIRATION_FAILED',
       );
+    }
+    try {
+      await this.messages.protectStoredEnvelopes();
+    } catch {
+      this.logger.error('MESSAGE_ENVELOPE_BACKFILL_FAILED');
+    } finally {
+      this.running = false;
     }
   }
 }

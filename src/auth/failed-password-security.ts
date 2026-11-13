@@ -1,13 +1,50 @@
 import { randomUUID } from 'node:crypto';
-
 import type { PoolClient } from 'pg';
 
+import { AppError } from '../http/app-error.js';
 import { env } from '../config/env.js';
 import { quoteIdentifier } from '../database/identifier.js';
 
 const schema = quoteIdentifier(env.SCHEMA);
 
 export const FAILED_PASSWORD_WIPE_THRESHOLD = 3;
+
+export function assertLoginNotLocked(lockedUntil: Date | null | undefined): void {
+  if (lockedUntil && lockedUntil.getTime() > Date.now()) {
+    throw new AppError(423, 'LOGIN_TEMPORARILY_LOCKED');
+  }
+}
+
+export async function registerUsernameLoginFailure(
+  client: PoolClient,
+  userId: string,
+  requestId: string,
+): Promise<boolean> {
+  // The caller holds the credential row lock through the wipe and COMMIT.
+  const result = await client.query<{ locked: boolean }>(
+    `UPDATE ${schema}.user_credentials
+     SET failed_attempts = CASE WHEN locked_until IS NOT NULL THEN 1
+                               ELSE failed_attempts + 1 END,
+         locked_until = CASE
+           WHEN locked_until IS NULL AND failed_attempts + 1 >= $2
+           THEN clock_timestamp() + INTERVAL '2 hours'
+           ELSE NULL
+         END
+     WHERE user_id = $1
+     RETURNING locked_until IS NOT NULL AS locked`,
+    [userId, FAILED_PASSWORD_WIPE_THRESHOLD],
+  );
+  await client.query(
+    `INSERT INTO ${schema}.security_events
+       (id, user_id, event_type, outcome, request_id)
+     VALUES ($1, $2, 'USERNAME_LOGIN', 'FAILURE', $3)`,
+    [randomUUID(), userId, requestId],
+  );
+  if (!result.rows[0]?.locked) return false;
+
+  await clearUserConversations(client, userId, requestId, 'FAILED_PASSWORD_DATA_WIPE');
+  return true;
+}
 
 export function shouldWipeAfterFailedPassword(
   previousFailedAttempts: number,
@@ -59,12 +96,19 @@ export async function registerFailedPasswordAttempt(
   return { failedAttempts, wiped };
 }
 
-export async function wipeUserPrivateData(
+export async function clearUserConversations(
   client: PoolClient,
   userId: string,
   requestId: string,
-  eventType = 'FAILED_PASSWORD_DATA_WIPE',
+  eventType: string,
 ): Promise<void> {
+  // Close the memberships first so concurrent message writes finish before cleanup.
+  await client.query(
+    `UPDATE ${schema}.conversation_members
+     SET status = 'LEFT'
+     WHERE user_id = $1`,
+    [userId],
+  );
   // End active calls before removing this user from their participant lists.
   await client.query(
     `UPDATE ${schema}.call_sessions call
@@ -109,16 +153,17 @@ export async function wipeUserPrivateData(
     `DELETE FROM ${schema}.messages WHERE sender_user_id = $1`,
     [userId],
   );
-  await client.query(
-    `UPDATE ${schema}.conversation_members
-     SET status = 'LEFT'
-     WHERE user_id = $1`,
-    [userId],
-  );
+  await client.query(`DELETE FROM ${schema}.auth_sessions WHERE user_id = $1`, [userId]);
+  await recordWipe(client, userId, requestId, eventType);
+}
 
-  // Recovery material, push endpoints, keys and sessions are private device state.
-  // Device registrations remain so a later correct password can still create a session;
-  // the endpoint intentionally has no account lockout.
+export async function wipeUserPrivateData(
+  client: PoolClient,
+  userId: string,
+  requestId: string,
+  eventType = 'FAILED_PASSWORD_DATA_WIPE',
+): Promise<void> {
+  await clearUserConversations(client, userId, requestId, eventType);
   await client.query(
     `DELETE FROM ${schema}.account_recovery_credentials WHERE user_id = $1`,
     [userId],
@@ -135,7 +180,6 @@ export async function wipeUserPrivateData(
     `DELETE FROM ${schema}.user_access_reset_tokens WHERE user_id = $1`,
     [userId],
   );
-  await client.query(`DELETE FROM ${schema}.auth_sessions WHERE user_id = $1`, [userId]);
   await client.query(`DELETE FROM ${schema}.push_subscriptions WHERE user_id = $1`, [userId]);
   await client.query(`DELETE FROM ${schema}.device_media_keys WHERE user_id = $1`, [userId]);
   await client.query(
@@ -144,9 +188,17 @@ export async function wipeUserPrivateData(
     [userId],
   );
 
+}
+
+async function recordWipe(
+  client: PoolClient,
+  userId: string,
+  requestId: string,
+  eventType: string,
+): Promise<void> {
   await client.query(
     `UPDATE ${schema}.users
-     SET security_wiped_at = NOW()
+     SET security_wiped_at = clock_timestamp()
      WHERE id = $1`,
     [userId],
   );

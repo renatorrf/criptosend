@@ -20,34 +20,38 @@ describe('health routes', () => {
     expect(response.json()).toEqual({ status: 'ok' });
   });
 
-  it('rejects malformed registration input without echoing it', async () => {
+  it.each([
+    '/auth/login', '/auth/refresh', '/auth/access/start', '/auth/username/recovery/start',
+  ])('retires the legacy entry point %s', async (url) => {
     const app = await buildApp();
     apps.push(app);
 
-    const response = await app.inject({
-      method: 'POST',
-      url: '/auth/register',
-      payload: { phone: '123' },
-    });
+    const response = await app.inject({ method: 'POST', url });
 
-    expect(response.statusCode).toBe(400);
-    expect(response.json()).toMatchObject({ error: 'INVALID_REQUEST' });
-    expect(response.body).not.toContain('123');
+    expect(response.statusCode).toBe(404);
   });
 
-  it('rejects malformed unified access input without revealing an account state', async () => {
+  it('rejects malformed activation input without echoing the token', async () => {
     const app = await buildApp();
     apps.push(app);
-
     const response = await app.inject({
       method: 'POST',
-      url: '/auth/access/start',
-      payload: { phone: '123', name: 'A' },
+      url: '/auth/invitations/check',
+      payload: { username: 'gestor.um', invitationCode: 'secret-short' },
     });
-
     expect(response.statusCode).toBe(400);
-    expect(response.json()).toMatchObject({ error: 'INVALID_REQUEST' });
-    expect(response.body).not.toContain('123');
+    expect(response.body).not.toContain('secret-short');
+  });
+
+  it('rejects malformed token checks without echoing the token', async () => {
+    const app = await buildApp();
+    apps.push(app);
+    const response = await app.inject({
+      method: 'POST', url: '/auth/access-token/check', payload: { token: 'secret-short' },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.body).not.toContain('secret-short');
+    expect(response.headers['cache-control']).toContain('no-store');
   });
 
   it('rejects malformed credential reset input before accessing account state', async () => {
@@ -72,7 +76,7 @@ describe('health routes', () => {
     const [refresh, logout] = await Promise.all([
       app.inject({
         method: 'POST',
-        url: '/auth/refresh',
+        url: '/auth/session/refresh',
         headers: { origin: 'https://untrusted.example' },
       }),
       app.inject({

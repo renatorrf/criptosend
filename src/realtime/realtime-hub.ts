@@ -169,6 +169,15 @@ export class RealtimeHub {
 
     this.io.on('connection', (socket) => {
       const auth = socket.data.auth;
+      socket.use((_packet, next) => {
+        void authService.authenticateRealtimeSession(auth).then(
+          () => { next(); },
+          () => {
+            next(new Error('UNAUTHORIZED'));
+            socket.disconnect(true);
+          },
+        );
+      });
       let lastTypingEventAt = 0;
       let signalWindowStartedAt = Date.now();
       let signalCount = 0;
@@ -259,7 +268,7 @@ export class RealtimeHub {
               { ...call },
             );
             void push
-              .notifyIncomingCall(recipients, call.conversationId, call.id, call.mediaType)
+              .notifyIncomingCall(recipients)
               .catch(() => undefined);
             acknowledge?.({ ok: true, call });
           })
@@ -282,9 +291,7 @@ export class RealtimeHub {
             ) ?? [...call.participants].reverse().find(({ joinedAt, leftAt }) => !joinedAt && !leftAt);
             if (invited) {
               this.emitToUsers([invited.userId], 'call:incoming', { ...call });
-              void push.notifyIncomingCall(
-                [invited.userId], call.conversationId, call.id, call.mediaType,
-              ).catch(() => undefined);
+              void push.notifyIncomingCall([invited.userId]).catch(() => undefined);
             }
             this.emitToUsers(this.joinedParticipantIds(call), 'call:accepted', {
               ...call,

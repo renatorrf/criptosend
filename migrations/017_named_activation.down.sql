@@ -1,0 +1,2 @@
+DROP INDEX invitation_codes_pending_username_idx;
+ALTER TABLE invitation_codes DROP COLUMN assigned_username;

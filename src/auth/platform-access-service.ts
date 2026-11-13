@@ -15,18 +15,16 @@ import {
   createRefreshToken,
   type AuthContext,
 } from './tokens.js';
-import type {
-  DeviceInput,
-  RecoveryCredentialInput,
-} from './account-access-service.js';
-import { verifyRecoveryProof } from './recovery-proof.js';
+import type { DeviceInput } from './account-access-service.js';
 import {
-  registerFailedPasswordAttempt,
-  wipeUserPrivateData,
+  assertLoginNotLocked,
+  clearUserConversations,
+  registerUsernameLoginFailure,
 } from './failed-password-security.js';
 
 const schema = quoteIdentifier(env.SCHEMA);
-const USER_ACCESS_RESET_TTL_SECONDS = 24 * 60 * 60;
+const ACCESS_RESET_TTL_SECONDS = 24 * 60 * 60;
+const accessResetTokenPattern = /^ar_([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})_[A-Za-z0-9_-]{43}$/;
 
 export type PlatformRole = 'PLATFORM_ADMIN' | 'MANAGER' | 'USER';
 export type ManagerLookupStatus =
@@ -48,8 +46,7 @@ export interface PlatformSession {
 interface CredentialRow {
   user_id: string;
   password_hash: string;
-  failed_attempts: number;
-  trusted_device: boolean;
+  locked_until: Date | null;
   role: PlatformRole;
   reset_required_at: Date | null;
 }
@@ -58,16 +55,6 @@ interface ActorRow {
   id: string;
   role: PlatformRole;
   status: string;
-}
-
-interface UsernameRecoveryRow {
-  user_id: string;
-  key_id: string;
-  public_key: Buffer;
-  wrapped_private_key: Buffer;
-  wrapping_iv: Buffer;
-  kdf_salt: Buffer;
-  kdf_parameters: Record<string, number>;
 }
 
 export function normalizePlatformUsername(value: string): string {
@@ -89,13 +76,6 @@ export function canCreateInvitation(
 
 export function managerPair(left: string, right: string): [string, string] {
   return left < right ? [left, right] : [right, left];
-}
-
-export function requiresManagerRecoveryAfterFailures(
-  role: PlatformRole,
-  failedAttempts: number,
-): boolean {
-  return role === 'MANAGER' && failedAttempts >= 3;
 }
 
 async function beginTransaction(): Promise<PoolClient> {
@@ -144,35 +124,6 @@ async function resolveDevice(
   return insertDevice(client, userId, input);
 }
 
-async function upsertRecovery(
-  client: PoolClient,
-  userId: string,
-  recovery: RecoveryCredentialInput,
-): Promise<void> {
-  await client.query(
-    `INSERT INTO ${schema}.account_recovery_credentials
-       (user_id, key_id, public_key, wrapped_private_key, wrapping_iv,
-        kdf_salt, kdf_parameters)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     ON CONFLICT (user_id) DO UPDATE SET
-       key_id = EXCLUDED.key_id,
-       public_key = EXCLUDED.public_key,
-       wrapped_private_key = EXCLUDED.wrapped_private_key,
-       wrapping_iv = EXCLUDED.wrapping_iv,
-       kdf_salt = EXCLUDED.kdf_salt,
-       kdf_parameters = EXCLUDED.kdf_parameters`,
-    [
-      userId,
-      recovery.keyId,
-      recovery.publicKey,
-      recovery.wrappedPrivateKey,
-      recovery.wrappingIv,
-      recovery.kdfSalt,
-      JSON.stringify(recovery.kdfParameters),
-    ],
-  );
-}
-
 async function createSession(
   client: PoolClient,
   userId: string,
@@ -219,164 +170,6 @@ async function recordEvent(
 }
 
 export class PlatformAccessService {
-  async startPasswordRecovery(
-    usernameInput: string,
-    requestId: string,
-  ): Promise<{
-    recoveryId: string;
-    recovery: {
-      keyId: string;
-      wrappedPrivateKey: string;
-      wrappingIv: string;
-      kdfSalt: string;
-      kdfParameters: Record<string, number>;
-      challenge: string;
-    };
-  }> {
-    const username = normalizePlatformUsername(usernameInput);
-    const recoveryId = randomUUID();
-    const challenge = randomBytes(32);
-    const result = await databasePool.query<UsernameRecoveryRow>(
-      `SELECT u.id AS user_id, r.key_id, r.public_key, r.wrapped_private_key,
-              r.wrapping_iv, r.kdf_salt, r.kdf_parameters
-       FROM ${schema}.users u
-       JOIN ${schema}.account_recovery_credentials r ON r.user_id = u.id
-       WHERE u.username = $1 AND u.status = 'ACTIVE'`,
-      [username],
-    );
-    const stored = result.rows[0];
-    if (stored) {
-      const client = await beginTransaction();
-      try {
-        await client.query(
-          `INSERT INTO ${schema}.username_recovery_challenges
-             (id, user_id, challenge, expires_at)
-           VALUES ($1, $2, $3, NOW() + INTERVAL '15 minutes')`,
-          [recoveryId, stored.user_id, challenge],
-        );
-        await recordEvent(client, 'USERNAME_RECOVERY_STARTED', requestId, stored.user_id);
-        await client.query('COMMIT');
-      } catch (error) {
-        await client.query('ROLLBACK');
-        throw error;
-      } finally {
-        client.release();
-      }
-    }
-
-    return {
-      recoveryId,
-      recovery: stored
-        ? {
-            keyId: stored.key_id,
-            wrappedPrivateKey: stored.wrapped_private_key.toString('base64'),
-            wrappingIv: stored.wrapping_iv.toString('base64'),
-            kdfSalt: stored.kdf_salt.toString('base64'),
-            kdfParameters: stored.kdf_parameters,
-            challenge: challenge.toString('base64'),
-          }
-        : {
-            keyId: randomUUID(),
-            wrappedPrivateKey: randomBytes(96).toString('base64'),
-            wrappingIv: randomBytes(12).toString('base64'),
-            kdfSalt: randomBytes(16).toString('base64'),
-            kdfParameters: {
-              memorySize: env.ARGON2_MEMORY_COST,
-              iterations: env.ARGON2_TIME_COST,
-              parallelism: env.ARGON2_PARALLELISM,
-              hashLength: 32,
-            },
-            challenge: challenge.toString('base64'),
-          },
-    };
-  }
-
-  async completePasswordRecovery(
-    recoveryId: string,
-    signature: Buffer,
-    newPassword: string,
-    requestId: string,
-  ): Promise<void> {
-    const client = await beginTransaction();
-    let finished = false;
-    try {
-      const result = await client.query<{
-        user_id: string;
-        challenge: Buffer;
-        attempts: number;
-        max_attempts: number;
-        expires_at: Date;
-        consumed_at: Date | null;
-        public_key: Buffer;
-      }>(
-        `SELECT c.user_id, c.challenge, c.attempts, c.max_attempts,
-                c.expires_at, c.consumed_at, r.public_key
-         FROM ${schema}.username_recovery_challenges c
-         JOIN ${schema}.account_recovery_credentials r ON r.user_id = c.user_id
-         JOIN ${schema}.users u ON u.id = c.user_id AND u.status = 'ACTIVE'
-         WHERE c.id = $1 FOR UPDATE OF c`,
-        [recoveryId],
-      );
-      const recovery = result.rows[0];
-      if (
-        !recovery ||
-        recovery.consumed_at ||
-        recovery.expires_at.getTime() <= Date.now() ||
-        recovery.attempts >= recovery.max_attempts
-      ) {
-        throw new AppError(400, 'INVALID_OR_EXPIRED_RECOVERY');
-      }
-      const valid = verifyRecoveryProof(
-        recovery.public_key,
-        recoveryId,
-        recovery.challenge,
-        signature,
-      );
-      if (!valid) {
-        await client.query(
-          `UPDATE ${schema}.username_recovery_challenges
-           SET attempts = attempts + 1 WHERE id = $1`,
-          [recoveryId],
-        );
-        await recordEvent(
-          client,
-          'USERNAME_PASSWORD_RECOVERY',
-          requestId,
-          recovery.user_id,
-          undefined,
-          'FAILURE',
-        );
-        await client.query('COMMIT');
-        finished = true;
-        throw new AppError(401, 'INVALID_RECOVERY_PROOF');
-      }
-      await client.query(
-        `UPDATE ${schema}.user_credentials
-         SET password_hash = $2, failed_attempts = 0, locked_until = NULL
-         WHERE user_id = $1`,
-        [recovery.user_id, await hashPassword(newPassword)],
-      );
-      await client.query(
-        `UPDATE ${schema}.auth_sessions
-         SET revoked_at = COALESCE(revoked_at, NOW()) WHERE user_id = $1`,
-        [recovery.user_id],
-      );
-      await client.query(
-        `UPDATE ${schema}.username_recovery_challenges
-         SET consumed_at = NOW() WHERE id = $1`,
-        [recoveryId],
-      );
-      await recordEvent(client, 'USERNAME_PASSWORD_RECOVERED', requestId, recovery.user_id);
-      await client.query('COMMIT');
-      finished = true;
-    } catch (error) {
-      if (!finished) await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
-
   async login(
     usernameInput: string,
     password: string,
@@ -388,19 +181,17 @@ export class PlatformAccessService {
     let committed = false;
     try {
       const result = await client.query<CredentialRow>(
-        `SELECT u.id AS user_id, u.role, c.password_hash, c.failed_attempts,
-                c.reset_required_at,
-                EXISTS (
-                  SELECT 1 FROM ${schema}.devices d
-                  WHERE d.id = $2::uuid AND d.user_id = u.id AND d.status = 'ACTIVE'
-                ) AS trusted_device
+        `SELECT u.id AS user_id, u.role, c.password_hash, c.locked_until,
+                CASE WHEN c.reset_reason = 'MANAGER_REQUEST' THEN c.reset_required_at END
+                  AS reset_required_at
          FROM ${schema}.users u
          JOIN ${schema}.user_credentials c ON c.user_id = u.id
          WHERE u.username = $1 AND u.status = 'ACTIVE'
          FOR UPDATE OF c`,
-        [username, device.deviceId ?? null],
+        [username],
       );
       const credential = result.rows[0];
+      assertLoginNotLocked(credential?.locked_until);
       if (credential?.reset_required_at) {
         throw new AppError(
           403,
@@ -412,44 +203,19 @@ export class PlatformAccessService {
       const valid = await verifyPassword(credential?.password_hash, password);
       if (!credential || !valid) {
         if (credential) {
-          const failure = await registerFailedPasswordAttempt(client, {
-            userId: credential.user_id,
-            requestId,
-            // Managers must prove possession of the administrator-issued token
-            // after the third failure. Their private data is only removed after
-            // that token is validated, preventing a username-only destructive DoS.
-            wipeEligible: credential.role !== 'MANAGER' && credential.trusted_device,
-            ...(credential.trusted_device && device.deviceId
-              ? { deviceId: device.deviceId }
-              : {}),
-            eventType: 'USERNAME_LOGIN',
-          });
-          const managerRecoveryRequired = requiresManagerRecoveryAfterFailures(
-            credential.role,
-            failure.failedAttempts,
-          );
-          if (managerRecoveryRequired) {
-            await client.query(
-              `UPDATE ${schema}.user_credentials
-               SET reset_required_at = NOW(),
-                   reset_reason = 'FAILED_ATTEMPTS',
-                   reset_requested_by_user_id = NULL
-               WHERE user_id = $1`,
-              [credential.user_id],
-            );
-          }
+          const locked = await registerUsernameLoginFailure(client, credential.user_id, requestId);
           await client.query('COMMIT');
           committed = true;
-          if (managerRecoveryRequired) {
-            throw new AppError(403, 'MANAGER_RECOVERY_TOKEN_REQUIRED');
-          }
+          if (locked) throw new AppError(423, 'LOGIN_TEMPORARILY_LOCKED');
         }
         throw new AppError(401, 'INVALID_CREDENTIALS');
       }
       const deviceId = await resolveDevice(client, credential.user_id, device);
       await client.query(
         `UPDATE ${schema}.user_credentials
-         SET failed_attempts = 0, locked_until = NULL WHERE user_id = $1`,
+         SET failed_attempts = 0, locked_until = NULL,
+             reset_required_at = NULL, reset_reason = NULL, reset_requested_by_user_id = NULL
+         WHERE user_id = $1`,
         [credential.user_id],
       );
       const session = await createSession(client, credential.user_id, deviceId);
@@ -465,54 +231,50 @@ export class PlatformAccessService {
     }
   }
 
+  async verifyInvitation(code: string, usernameInput: string): Promise<void> {
+    const username = normalizePlatformUsername(usernameInput);
+    await this.findInvitation(databasePool, code, username);
+  }
+
+  async verifyAccessToken(code: string): Promise<{ kind: 'INVITATION' | 'RESET' }> {
+    const selector = accessResetTokenPattern.exec(code)?.[1];
+    if (selector) {
+      const result = await databasePool.query<{ token_hash: string; locked_until: Date | null }>(
+        `SELECT t.token_hash, c.locked_until
+         FROM ${schema}.user_access_reset_tokens t
+         JOIN ${schema}.users u ON u.id = t.user_id AND u.status = 'ACTIVE'
+         JOIN ${schema}.user_credentials c ON c.user_id = u.id
+         WHERE t.id = $1::uuid AND t.consumed_at IS NULL AND t.expires_at > NOW()
+           AND c.reset_reason = 'MANAGER_REQUEST'`,
+        [selector],
+      );
+      const token = result.rows[0];
+      if (!await verifyPassword(token?.token_hash, code)) {
+        throw new AppError(400, 'INVALID_ACCESS_TOKEN');
+      }
+      assertLoginNotLocked(token?.locked_until);
+      return { kind: 'RESET' };
+    }
+    try {
+      await this.findInvitation(databasePool, code);
+      return { kind: 'INVITATION' };
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== 'INVALID_OR_EXPIRED_INVITATION') throw error;
+      throw new AppError(400, 'INVALID_ACCESS_TOKEN');
+    }
+  }
+
   async redeemInvitation(
     code: string,
-    name: string,
     usernameInput: string,
-    nicknameInput: string,
     password: string,
     device: DeviceInput,
-    recovery: RecoveryCredentialInput,
     requestId: string,
   ): Promise<PlatformSession> {
     const username = normalizePlatformUsername(usernameInput);
-    const nickname = normalizePlatformUsername(nicknameInput);
     const client = await beginTransaction();
     try {
-      const inviteResult = await client.query<{
-        id: string;
-        role: Exclude<PlatformRole, 'PLATFORM_ADMIN'>;
-        created_by_user_id: string;
-        creator_role: PlatformRole;
-        creator_status: string;
-        expires_at: Date;
-        used_at: Date | null;
-        revoked_at: Date | null;
-      }>(
-        `SELECT i.id, i.role, i.created_by_user_id, i.expires_at,
-                i.used_at, i.revoked_at, u.role AS creator_role,
-                u.status AS creator_status
-         FROM ${schema}.invitation_codes i
-         JOIN ${schema}.users u ON u.id = i.created_by_user_id
-         WHERE i.code_hash = $1
-         FOR UPDATE OF i`,
-        [hashRefreshToken(code.trim())],
-      );
-      const invite = inviteResult.rows[0];
-      const creatorCanInvite =
-        invite?.creator_status === 'ACTIVE' &&
-        ((invite.role === 'MANAGER' && invite.creator_role === 'PLATFORM_ADMIN') ||
-          (invite.role === 'USER' &&
-            (invite.creator_role === 'PLATFORM_ADMIN' || invite.creator_role === 'MANAGER')));
-      if (
-        !invite ||
-        invite.used_at ||
-        invite.revoked_at ||
-        invite.expires_at.getTime() <= Date.now() ||
-        !creatorCanInvite
-      ) {
-        throw new AppError(400, 'INVALID_OR_EXPIRED_INVITATION');
-      }
+      const invite = await this.findInvitation(client, code, username, true);
       const existing = await client.query(
         `SELECT 1 FROM ${schema}.users WHERE username = $1`,
         [username],
@@ -526,7 +288,7 @@ export class PlatformAccessService {
            FROM ${schema}.users
            WHERE COALESCE(manager_user_id, id) = $1
              AND nickname = $2`,
-          [managerUserId, nickname],
+          [managerUserId, username],
         );
         if (existingNickname.rowCount !== 0) {
           throw new AppError(409, 'NICKNAME_ALREADY_EXISTS');
@@ -541,9 +303,9 @@ export class PlatformAccessService {
          VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6, FALSE)`,
         [
           userId,
-          encryptField(name.trim(), 'user-name'),
+          encryptField(username, 'user-name'),
           username,
-          nickname,
+          username,
           invite.role,
           managerUserId,
         ],
@@ -574,7 +336,6 @@ export class PlatformAccessService {
         [userId, await hashPassword(password)],
       );
       const deviceId = await insertDevice(client, userId, device);
-      await upsertRecovery(client, userId, recovery);
       await client.query(
         `UPDATE ${schema}.invitation_codes
          SET used_by_user_id = $2, used_at = NOW() WHERE id = $1`,
@@ -606,12 +367,58 @@ export class PlatformAccessService {
     }
   }
 
+  private async findInvitation(
+    database: Pick<PoolClient, 'query'>,
+    code: string,
+    username?: string,
+    lock = false,
+  ) {
+    const inviteResult = await database.query<{
+      id: string;
+      role: Exclude<PlatformRole, 'PLATFORM_ADMIN'>;
+      created_by_user_id: string;
+      creator_role: PlatformRole;
+      creator_status: string;
+      expires_at: Date;
+      used_at: Date | null;
+      revoked_at: Date | null;
+    }>(
+      `SELECT i.id, i.role, i.created_by_user_id, i.expires_at,
+              i.used_at, i.revoked_at, u.role AS creator_role,
+              u.status AS creator_status
+       FROM ${schema}.invitation_codes i
+       JOIN ${schema}.users u ON u.id = i.created_by_user_id
+       WHERE i.code_hash = $1 AND i.assigned_username IS NOT NULL
+         AND ($2::text IS NULL OR i.assigned_username = $2)
+       ${lock ? 'FOR UPDATE OF i' : ''}`,
+      [hashRefreshToken(code.trim()), username ?? null],
+    );
+    const invite = inviteResult.rows[0];
+    const creatorCanInvite =
+      invite?.creator_status === 'ACTIVE' &&
+      ((invite.role === 'MANAGER' && invite.creator_role === 'PLATFORM_ADMIN') ||
+        (invite.role === 'USER' &&
+          (invite.creator_role === 'PLATFORM_ADMIN' || invite.creator_role === 'MANAGER')));
+    if (
+      !invite ||
+      invite.used_at ||
+      invite.revoked_at ||
+      invite.expires_at.getTime() <= Date.now() ||
+      !creatorCanInvite
+    ) {
+      throw new AppError(400, 'INVALID_OR_EXPIRED_INVITATION');
+    }
+    return invite;
+  }
+
   async createInvitation(
     actor: AuthContext,
     role: Exclude<PlatformRole, 'PLATFORM_ADMIN'>,
+    usernameInput: string,
     expiresInHours: number,
     requestId: string,
-  ): Promise<{ id: string; code: string; expiresAt: Date; role: string }> {
+  ): Promise<{ id: string; code: string; username: string; expiresAt: Date; role: string }> {
+    const username = normalizePlatformUsername(usernameInput);
     const actorRow = await this.actor(actor.userId);
     if (!canCreateInvitation(actorRow.role, role)) {
       throw new AppError(403, 'FORBIDDEN');
@@ -621,6 +428,26 @@ export class PlatformAccessService {
     const expiresAt = new Date(Date.now() + expiresInHours * 60 * 60 * 1_000);
     const client = await beginTransaction();
     try {
+      // Serialize reservations for this username, including requests from different managers.
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [username]);
+      const reservedUsername = await client.query(
+        `SELECT 1 FROM ${schema}.users WHERE username = $1
+         UNION ALL
+         SELECT 1 FROM ${schema}.invitation_codes
+         WHERE assigned_username = $1 AND used_at IS NULL
+           AND revoked_at IS NULL AND expires_at > NOW()`,
+        [username],
+      );
+      if (reservedUsername.rowCount) throw new AppError(409, 'USERNAME_ALREADY_EXISTS');
+      if (role === 'USER') {
+        const existingNickname = await client.query(
+          `SELECT 1 FROM ${schema}.users
+           WHERE COALESCE(manager_user_id, id) = $1 AND nickname = $2`,
+          [actor.userId, username],
+        );
+        if (existingNickname.rowCount) throw new AppError(409, 'NICKNAME_ALREADY_EXISTS');
+      }
+
       if (actorRow.role === 'MANAGER' && role === 'USER') {
         const balance = await client.query<{ available_credits: number }>(
           `SELECT available_credits
@@ -634,6 +461,7 @@ export class PlatformAccessService {
            FROM ${schema}.invitation_codes
            WHERE created_by_user_id = $1
              AND role = 'USER'
+             AND assigned_username IS NOT NULL
              AND used_at IS NULL
              AND revoked_at IS NULL
              AND expires_at > NOW()`,
@@ -647,13 +475,13 @@ export class PlatformAccessService {
       }
       await client.query(
         `INSERT INTO ${schema}.invitation_codes
-           (id, code_hash, role, created_by_user_id, expires_at)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [id, hashRefreshToken(code), role, actor.userId, expiresAt],
+           (id, code_hash, role, created_by_user_id, expires_at, assigned_username)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [id, hashRefreshToken(code), role, actor.userId, expiresAt, username],
       );
       await recordEvent(client, 'INVITATION_CREATED', requestId, actor.userId, actor.deviceId);
       await client.query('COMMIT');
-      return { id, code, expiresAt, role };
+      return { id, code, username, expiresAt, role };
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
@@ -667,12 +495,13 @@ export class PlatformAccessService {
     const result = await databasePool.query<{
       id: string;
       role: string;
+      assigned_username: string | null;
       created_at: Date;
       expires_at: Date;
       used_at: Date | null;
       revoked_at: Date | null;
     }>(
-      `SELECT id, role, created_at, expires_at, used_at, revoked_at
+      `SELECT id, role, assigned_username, created_at, expires_at, used_at, revoked_at
        FROM ${schema}.invitation_codes
        WHERE created_by_user_id = $1
        ORDER BY created_at DESC LIMIT 100`,
@@ -681,13 +510,14 @@ export class PlatformAccessService {
     return result.rows.map((invite) => ({
       id: invite.id,
       role: invite.role,
+      username: invite.assigned_username,
       createdAt: invite.created_at,
       expiresAt: invite.expires_at,
       status: invite.revoked_at
         ? 'REVOKED'
         : invite.used_at
           ? 'USED'
-          : invite.expires_at.getTime() <= Date.now()
+          : !invite.assigned_username || invite.expires_at.getTime() <= Date.now()
             ? 'EXPIRED'
             : 'ACTIVE',
     }));
@@ -726,8 +556,8 @@ export class PlatformAccessService {
                   u.phone_encrypted, u.created_at,
                   c.reset_required_at,
                   EXISTS (
-                    SELECT 1 FROM ${schema}.manager_recovery_tokens token
-                    WHERE token.manager_user_id = u.id AND token.consumed_at IS NULL
+                    SELECT 1 FROM ${schema}.user_access_reset_tokens token
+                    WHERE token.user_id = u.id AND token.consumed_at IS NULL AND token.expires_at > NOW()
                   ) AS recovery_token_configured,
                   COALESCE(b.available_credits, 0) AS available_credits,
                   COALESCE(b.consumed_credits, 0) AS consumed_credits,
@@ -735,6 +565,7 @@ export class PlatformAccessService {
                    FROM ${schema}.invitation_codes i
                    WHERE i.created_by_user_id = u.id
                      AND i.role = 'USER'
+                     AND i.assigned_username IS NOT NULL
                      AND i.used_at IS NULL
                      AND i.revoked_at IS NULL
                      AND i.expires_at > NOW()) AS active_invitations
@@ -774,37 +605,53 @@ export class PlatformAccessService {
     }));
   }
 
-  async requestManagedUserAccessReset(
+  requestManagedUserAccessReset(
     actor: AuthContext,
     targetUserId: string,
     requestId: string,
   ): Promise<{ token: string; expiresAt: Date }> {
+    return this.issueAccessReset(actor, targetUserId, 'USER', requestId);
+  }
+
+  rotateManagerRecoveryToken(
+    actor: AuthContext,
+    managerUserId: string,
+    requestId: string,
+  ): Promise<{ token: string; expiresAt: Date }> {
+    return this.issueAccessReset(actor, managerUserId, 'MANAGER', requestId);
+  }
+
+  private async issueAccessReset(
+    actor: AuthContext,
+    targetUserId: string,
+    targetRole: Exclude<PlatformRole, 'PLATFORM_ADMIN'>,
+    requestId: string,
+  ): Promise<{ token: string; expiresAt: Date }> {
     const actorRow = await this.actor(actor.userId);
-    if (actorRow.role !== 'MANAGER' || targetUserId === actor.userId) {
+    const requiredRole = targetRole === 'USER' ? 'MANAGER' : 'PLATFORM_ADMIN';
+    if (actorRow.role !== requiredRole || targetUserId === actor.userId) {
       throw new AppError(403, 'FORBIDDEN');
     }
-    const token = `ur_${randomBytes(32).toString('base64url')}`;
-    const expiresAt = new Date(Date.now() + USER_ACCESS_RESET_TTL_SECONDS * 1_000);
+    const tokenId = randomUUID();
+    const token = `ar_${tokenId}_${randomBytes(32).toString('base64url')}`;
+    const tokenHash = await hashPassword(token);
+    const expiresAt = new Date(Date.now() + ACCESS_RESET_TTL_SECONDS * 1_000);
     const client = await beginTransaction();
     try {
       const target = await client.query(
-        `SELECT 1 FROM ${schema}.users
-         WHERE id = $1 AND role = 'USER' AND manager_user_id = $2
-         FOR UPDATE`,
-        [targetUserId, actor.userId],
+        `SELECT 1 FROM ${schema}.users u
+         JOIN ${schema}.user_credentials c ON c.user_id = u.id
+         WHERE u.id = $1 AND u.role = $2 AND u.status = 'ACTIVE'
+           AND ($2 <> 'USER' OR u.manager_user_id = $3)
+         FOR UPDATE OF c`,
+        [targetUserId, targetRole, actor.userId],
       );
       if (target.rowCount !== 1) throw new AppError(404, 'USER_NOT_FOUND');
 
-      await wipeUserPrivateData(
-        client,
-        targetUserId,
-        requestId,
-        'MANAGED_USER_DATA_WIPE',
-      );
+      await clearUserConversations(client, targetUserId, requestId, 'ACCESS_RESET_CONVERSATIONS_CLEARED');
       await client.query(
         `UPDATE ${schema}.user_credentials
          SET failed_attempts = 0,
-             locked_until = NULL,
              reset_required_at = NOW(),
              reset_reason = 'MANAGER_REQUEST',
              reset_requested_by_user_id = $2
@@ -812,65 +659,26 @@ export class PlatformAccessService {
         [targetUserId, actor.userId],
       );
       await client.query(
+        `UPDATE ${schema}.user_access_reset_tokens
+         SET consumed_at = NOW() WHERE user_id = $1 AND consumed_at IS NULL`,
+        [targetUserId],
+      );
+      if (targetRole === 'MANAGER') {
+        await client.query(
+          `UPDATE ${schema}.manager_recovery_tokens
+           SET consumed_at = NOW() WHERE manager_user_id = $1 AND consumed_at IS NULL`,
+          [targetUserId],
+        );
+      }
+      await client.query(
         `INSERT INTO ${schema}.user_access_reset_tokens
            (id, user_id, token_hash, created_by_user_id, expires_at)
          VALUES ($1, $2, $3, $4, $5)`,
-        [randomUUID(), targetUserId, await hashPassword(token), actor.userId, expiresAt],
+        [tokenId, targetUserId, tokenHash, actor.userId, expiresAt],
       );
-      await recordEvent(
-        client,
-        'MANAGED_USER_ACCESS_RESET_REQUESTED',
-        requestId,
-        actor.userId,
-        actor.deviceId,
-      );
+      await recordEvent(client, 'ACCESS_RESET_REQUESTED', requestId, actor.userId, actor.deviceId);
       await client.query('COMMIT');
       return { token, expiresAt };
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
-
-  async rotateManagerRecoveryToken(
-    actor: AuthContext,
-    managerUserId: string,
-    requestId: string,
-  ): Promise<{ token: string; createdAt: Date }> {
-    const actorRow = await this.actor(actor.userId);
-    if (actorRow.role !== 'PLATFORM_ADMIN') throw new AppError(403, 'FORBIDDEN');
-    const token = `mr_${randomBytes(32).toString('base64url')}`;
-    const createdAt = new Date();
-    const client = await beginTransaction();
-    try {
-      const manager = await client.query(
-        `SELECT 1 FROM ${schema}.users
-         WHERE id = $1 AND role = 'MANAGER' AND status = 'ACTIVE'`,
-        [managerUserId],
-      );
-      if (manager.rowCount !== 1) throw new AppError(404, 'MANAGER_NOT_FOUND');
-      await client.query(
-        `INSERT INTO ${schema}.manager_recovery_tokens
-           (manager_user_id, token_hash, generated_by_user_id, created_at, consumed_at)
-         VALUES ($1, $2, $3, $4, NULL)
-         ON CONFLICT (manager_user_id) DO UPDATE SET
-           token_hash = EXCLUDED.token_hash,
-           generated_by_user_id = EXCLUDED.generated_by_user_id,
-           created_at = EXCLUDED.created_at,
-           consumed_at = NULL`,
-        [managerUserId, await hashPassword(token), actor.userId, createdAt],
-      );
-      await recordEvent(
-        client,
-        'MANAGER_RECOVERY_TOKEN_ROTATED',
-        requestId,
-        actor.userId,
-        actor.deviceId,
-      );
-      await client.query('COMMIT');
-      return { token, createdAt };
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
@@ -884,7 +692,6 @@ export class PlatformAccessService {
     token: string,
     newPassword: string,
     device: DeviceInput,
-    recovery: RecoveryCredentialInput,
     requestId: string,
   ): Promise<PlatformSession> {
     const username = normalizePlatformUsername(usernameInput);
@@ -895,8 +702,9 @@ export class PlatformAccessService {
         id: string;
         role: PlatformRole;
         reset_required_at: Date | null;
+        locked_until: Date | null;
       }>(
-        `SELECT u.id, u.role, c.reset_required_at
+        `SELECT u.id, u.role, c.reset_required_at, c.locked_until
          FROM ${schema}.users u
          JOIN ${schema}.user_credentials c ON c.user_id = u.id
          WHERE u.username = $1 AND u.status = 'ACTIVE'
@@ -904,38 +712,19 @@ export class PlatformAccessService {
         [username],
       );
       const user = userResult.rows[0];
-      let tokenHash: string | undefined;
-      if (user?.role === 'USER' && user.reset_required_at) {
-        const reset = await client.query<{ token_hash: string }>(
-          `SELECT token_hash
-           FROM ${schema}.user_access_reset_tokens
+      assertLoginNotLocked(user?.locked_until);
+      const selector = accessResetTokenPattern.exec(token)?.[1];
+      const reset = user?.reset_required_at && user.role !== 'PLATFORM_ADMIN'
+        ? (await client.query<{ id: string; token_hash: string }>(
+          `SELECT id, token_hash FROM ${schema}.user_access_reset_tokens
            WHERE user_id = $1 AND consumed_at IS NULL AND expires_at > NOW()
+             AND ($2::uuid IS NULL OR id = $2)
            FOR UPDATE`,
-          [user.id],
-        );
-        tokenHash = reset.rows[0]?.token_hash;
-      } else if (user?.role === 'MANAGER') {
-        const managerToken = await client.query<{ token_hash: string }>(
-          `SELECT token_hash
-           FROM ${schema}.manager_recovery_tokens
-           WHERE manager_user_id = $1 AND consumed_at IS NULL
-           FOR UPDATE`,
-          [user.id],
-        );
-        tokenHash = managerToken.rows[0]?.token_hash;
-      }
+          [user.id, selector ?? null],
+        )).rows[0] : undefined;
+      const valid = await verifyPassword(reset?.token_hash, token.trim());
+      if (!user || !reset || !valid) throw new AppError(401, 'INVALID_RESET_TOKEN');
 
-      const valid = await verifyPassword(tokenHash, token.trim());
-      if (!user || !valid || user.role === 'PLATFORM_ADMIN') {
-        throw new AppError(401, 'INVALID_RESET_TOKEN');
-      }
-
-      await wipeUserPrivateData(
-        client,
-        user.id,
-        requestId,
-        'CREDENTIAL_RESET_DATA_WIPE',
-      );
       await client.query(
         `UPDATE ${schema}.user_credentials
          SET password_hash = $2,
@@ -947,22 +736,11 @@ export class PlatformAccessService {
          WHERE user_id = $1`,
         [user.id, await hashPassword(newPassword)],
       );
+      const deviceId = await resolveDevice(client, user.id, device);
       await client.query(
-        `UPDATE ${schema}.devices
-         SET status = 'REVOKED', revoked_at = COALESCE(revoked_at, NOW())
-         WHERE user_id = $1 AND status = 'ACTIVE'`,
-        [user.id],
+        `UPDATE ${schema}.user_access_reset_tokens SET consumed_at = NOW() WHERE id = $1`,
+        [reset.id],
       );
-      const deviceId = await insertDevice(client, user.id, device);
-      await upsertRecovery(client, user.id, recovery);
-      if (user.role === 'MANAGER') {
-        await client.query(
-          `UPDATE ${schema}.manager_recovery_tokens
-           SET consumed_at = NOW()
-           WHERE manager_user_id = $1`,
-          [user.id],
-        );
-      }
       const session = await createSession(client, user.id, deviceId);
       await recordEvent(
         client,
@@ -1000,6 +778,7 @@ export class PlatformAccessService {
        LEFT JOIN ${schema}.invitation_codes i
          ON i.created_by_user_id = b.manager_user_id
         AND i.role = 'USER'
+        AND i.assigned_username IS NOT NULL
         AND i.used_at IS NULL
         AND i.revoked_at IS NULL
         AND i.expires_at > NOW()
@@ -1423,14 +1202,15 @@ export class PlatformAccessService {
   ): Promise<void> {
     const client = await beginTransaction();
     try {
-      const result = await client.query<{ password_hash: string }>(
-        `SELECT c.password_hash
+      const result = await client.query<{ password_hash: string; locked_until: Date | null }>(
+        `SELECT c.password_hash, c.locked_until
          FROM ${schema}.user_credentials c
          JOIN ${schema}.users u ON u.id = c.user_id AND u.status = 'ACTIVE'
          WHERE c.user_id = $1
          FOR UPDATE OF c`,
         [actor.userId],
       );
+      assertLoginNotLocked(result.rows[0]?.locked_until);
       const valid = await verifyPassword(result.rows[0]?.password_hash, currentPassword);
       if (!valid) throw new AppError(401, 'INVALID_CREDENTIALS');
       await client.query(

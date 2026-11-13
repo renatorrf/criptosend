@@ -5,7 +5,6 @@ import {
   canCreateInvitation,
   managerPair,
   normalizePlatformUsername,
-  requiresManagerRecoveryAfterFailures,
 } from '../src/auth/platform-access-service.js';
 
 describe('platform access policy', () => {
@@ -35,12 +34,4 @@ describe('platform access policy', () => {
     ]);
   });
 
-  it('requires the manager recovery token from the third failure onward', () => {
-    expect(requiresManagerRecoveryAfterFailures('MANAGER', 1)).toBe(false);
-    expect(requiresManagerRecoveryAfterFailures('MANAGER', 2)).toBe(false);
-    expect(requiresManagerRecoveryAfterFailures('MANAGER', 3)).toBe(true);
-    expect(requiresManagerRecoveryAfterFailures('MANAGER', 4)).toBe(true);
-    expect(requiresManagerRecoveryAfterFailures('USER', 3)).toBe(false);
-    expect(requiresManagerRecoveryAfterFailures('PLATFORM_ADMIN', 3)).toBe(false);
-  });
 });

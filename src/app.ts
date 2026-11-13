@@ -7,7 +7,6 @@ import Fastify, {
 } from 'fastify';
 
 import { registerAuthRoutes } from './auth/auth-routes.js';
-import { registerAccountAccessRoutes } from './auth/account-access-routes.js';
 import { registerPlatformAccessRoutes } from './auth/platform-access-routes.js';
 import {
   createVerificationProvider,
@@ -79,6 +78,9 @@ export async function buildApp(
   await app.register(helmet, {
     contentSecurityPolicy: false,
   });
+  app.addHook('onRequest', async (_request, reply) => {
+    reply.header('cache-control', 'private, no-store');
+  });
   await app.register(cors, {
     credentials: true,
     methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -98,7 +100,6 @@ export async function buildApp(
     app,
     verificationProvider,
   );
-  registerAccountAccessRoutes(app, verificationProvider);
   registerPlatformAccessRoutes(app, authService);
   registerKeyRoutes(app, authService);
   registerUserRoutes(app, authService);

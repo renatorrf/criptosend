@@ -8,34 +8,7 @@ import { AppError } from '../http/app-error.js';
 import { AuthService } from './auth-service.js';
 import type { VerificationProvider } from './verification-provider.js';
 
-const phoneSchema = z.string().trim().min(8).max(30);
-const pinSchema = z.string().min(6).max(64);
 const uuidSchema = z.uuid();
-const base64Schema = z
-  .string()
-  .min(40)
-  .max(1_024)
-  .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/);
-
-const registerSchema = z.object({ phone: phoneSchema }).strict();
-const verifySchema = z
-  .object({
-    verificationId: uuidSchema,
-    code: z.string().regex(/^\d{6}$/),
-    name: z.string().trim().min(1).max(100),
-    pin: pinSchema,
-    deviceName: z.string().trim().min(1).max(100),
-    identityPublicKey: base64Schema,
-    registrationId: z.number().int().min(0).max(2_147_483_647),
-  })
-  .strict();
-const loginSchema = z
-  .object({
-    phone: phoneSchema,
-    pin: pinSchema,
-    deviceId: uuidSchema,
-  })
-  .strict();
 const deviceParamsSchema = z.object({ id: uuidSchema }).strict();
 const privacyPreferencesSchema = z
   .object({
@@ -110,61 +83,17 @@ export async function registerAuthRoutes(
   };
 
   app.post(
-    '/auth/register',
-    { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } },
-    async (request, reply) => {
-      const body = parse(registerSchema, request.body);
-      const result = await service.startRegistration(body.phone);
-      return reply.code(202).send(result);
-    },
-  );
-
-  app.post(
-    '/auth/verify',
-    { config: { rateLimit: { max: 10, timeWindow: '15 minutes' } } },
-    async (request, reply) => {
-      const body = parse(verifySchema, request.body);
-      const identityPublicKey = Buffer.from(body.identityPublicKey, 'base64');
-      if (identityPublicKey.length < 32 || identityPublicKey.length > 256) {
-        throw new AppError(400, 'INVALID_REQUEST');
-      }
-      const tokens = await service.verifyRegistration(
-        { ...body, identityPublicKey },
-        request.id,
-      );
-      reply.setCookie(env.AUTH_COOKIE_NAME, tokens.refreshToken, cookieOptions);
-      return reply.code(201).send(sessionResponse(tokens));
-    },
-  );
-
-  app.post(
-    '/auth/login',
-    { config: { rateLimit: { max: 10, timeWindow: '15 minutes' } } },
-    async (request, reply) => {
-      const body = parse(loginSchema, request.body);
-      const tokens = await service.login(
-        body.phone,
-        body.pin,
-        body.deviceId,
-        request.id,
-      );
-      reply.setCookie(env.AUTH_COOKIE_NAME, tokens.refreshToken, cookieOptions);
-      return sessionResponse(tokens);
-    },
-  );
-
-  app.post(
-    '/auth/refresh',
+    '/auth/session/refresh',
     { config: { rateLimit: { max: 30, timeWindow: '15 minutes' } } },
     async (request, reply) => {
       assertTrustedOrigin(request);
-      const refreshToken = requestRefreshToken(request);
+      const authorization = request.headers.authorization;
+      const refreshToken = authorization?.startsWith('Bearer ') ? authorization.slice(7) : undefined;
       if (!refreshToken) {
         throw new AppError(401, 'INVALID_REFRESH_TOKEN');
       }
       const tokens = await service.refresh(refreshToken, request.id);
-      reply.setCookie(env.AUTH_COOKIE_NAME, tokens.refreshToken, cookieOptions);
-      return sessionResponse(tokens);
+      return reply.send(sessionResponse(tokens));
     },
   );
 

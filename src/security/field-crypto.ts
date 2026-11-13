@@ -11,10 +11,14 @@ const NONCE_BYTES = 12;
 const AUTH_TAG_BYTES = 16;
 
 export function encryptField(value: string, context: string): Buffer {
+  return encryptFieldBytes(Buffer.from(value, 'utf8'), context);
+}
+
+export function encryptFieldBytes(value: Buffer, context: string): Buffer {
   const nonce = randomBytes(NONCE_BYTES);
   const cipher = createCipheriv('aes-256-gcm', env.FIELD_ENCRYPTION_KEY, nonce);
   cipher.setAAD(Buffer.from(context, 'utf8'));
-  const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+  const ciphertext = Buffer.concat([cipher.update(value), cipher.final()]);
 
   return Buffer.concat([
     Buffer.from([FORMAT_VERSION]),
@@ -25,6 +29,10 @@ export function encryptField(value: string, context: string): Buffer {
 }
 
 export function decryptField(payload: Buffer, context: string): string {
+  return decryptFieldBytes(payload, context).toString('utf8');
+}
+
+export function decryptFieldBytes(payload: Buffer, context: string): Buffer {
   if (
     payload.length <= 1 + NONCE_BYTES + AUTH_TAG_BYTES ||
     payload[0] !== FORMAT_VERSION
@@ -46,5 +54,5 @@ export function decryptField(payload: Buffer, context: string): string {
   return Buffer.concat([
     decipher.update(payload.subarray(ciphertextStart)),
     decipher.final(),
-  ]).toString('utf8');
+  ]);
 }

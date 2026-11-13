@@ -22,7 +22,7 @@ import {
   verifyAccessToken,
 } from './tokens.js';
 import type { VerificationProvider } from './verification-provider.js';
-import { registerFailedPasswordAttempt } from './failed-password-security.js';
+import { assertLoginNotLocked, registerFailedPasswordAttempt } from './failed-password-security.js';
 
 const schema = quoteIdentifier(env.SCHEMA);
 
@@ -388,6 +388,16 @@ export class AuthService {
     const client = await beginTransaction();
     let transactionFinished = false;
     try {
+      // Match the credential-first lock order used by failed login and account reset.
+      const credential = await client.query<{ locked_until: Date | null }>(
+        `SELECT c.locked_until
+         FROM ${schema}.user_credentials c
+         JOIN ${schema}.auth_sessions s ON s.user_id = c.user_id
+         WHERE s.refresh_token_hash = $1
+         FOR UPDATE OF c`,
+        [hashRefreshToken(refreshToken)],
+      );
+      assertLoginNotLocked(credential.rows[0]?.locked_until);
       const result = await client.query<SessionRow>(
         `SELECT s.id, s.user_id, s.device_id, s.session_family_id,
                 s.expires_at, s.revoked_at, s.replaced_by_id
@@ -489,7 +499,9 @@ export class AuthService {
        FROM ${schema}.auth_sessions s
        JOIN ${schema}.users u ON u.id = s.user_id AND u.status = 'ACTIVE'
        JOIN ${schema}.devices d ON d.id = s.device_id AND d.status = 'ACTIVE'
+       JOIN ${schema}.user_credentials c ON c.user_id = s.user_id
        WHERE s.id = $1 AND s.user_id = $2 AND s.device_id = $3
+         AND (c.locked_until IS NULL OR c.locked_until <= clock_timestamp())
          AND s.revoked_at IS NULL AND s.expires_at > NOW()`,
       [context.sessionId, context.userId, context.deviceId],
     );
@@ -497,6 +509,25 @@ export class AuthService {
       throw new AppError(401, 'UNAUTHORIZED');
     }
     return context;
+  }
+
+  async authenticateRealtimeSession(context: AuthContext): Promise<void> {
+    const active = await databasePool.query(
+      `SELECT 1
+       FROM ${schema}.auth_sessions original
+       JOIN ${schema}.auth_sessions s
+         ON s.user_id = original.user_id AND s.device_id = original.device_id
+         AND (s.id = original.id OR s.session_family_id = original.session_family_id)
+       JOIN ${schema}.users u ON u.id = s.user_id AND u.status = 'ACTIVE'
+       JOIN ${schema}.devices d ON d.id = s.device_id AND d.status = 'ACTIVE'
+       JOIN ${schema}.user_credentials c ON c.user_id = s.user_id
+       WHERE original.id = $1 AND original.user_id = $2 AND original.device_id = $3
+         AND s.revoked_at IS NULL AND s.expires_at > NOW()
+         AND (c.locked_until IS NULL OR c.locked_until <= clock_timestamp())
+       LIMIT 1`,
+      [context.sessionId, context.userId, context.deviceId],
+    );
+    if (active.rowCount !== 1) throw new AppError(401, 'UNAUTHORIZED');
   }
 
   async getMe(userId: string): Promise<Record<string, unknown>> {

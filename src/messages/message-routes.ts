@@ -19,7 +19,8 @@ const base64Schema = z
   .string()
   .min(4)
   .max(2_800_000)
-  .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/);
+  .regex(/^[A-Za-z0-9+/]*={0,2}$/)
+  .refine((value) => value.length % 4 === 0);
 const createMessageSchema = z
   .object({
     clientMessageId: z.uuid(),
@@ -83,7 +84,6 @@ export function registerMessageRoutes(
       realtime.emitToUsers(memberIds, 'message:received', result.message);
       void push.notifyNewMessage(
         memberIds.filter((userId) => userId !== auth.userId),
-        params.data.id,
       ).catch(() => {
         request.log.error('PUSH_NOTIFICATION_FAILED');
       });

@@ -355,5 +355,24 @@ export async function verifyTables(): Promise<string[]> {
     throw new Error('The configured schema is missing credential reset state.');
   }
 
+  const activationUsername = await databasePool.query(
+    `SELECT 1 FROM information_schema.columns
+     WHERE table_schema = $1 AND table_name = 'invitation_codes'
+       AND column_name = 'assigned_username'`,
+    [env.SCHEMA],
+  );
+  if (activationUsername.rowCount !== 1) {
+    throw new Error('The configured schema is missing named activation tokens.');
+  }
+
+  const messageEnvelope = await databasePool.query(
+    `SELECT 1 FROM information_schema.columns
+     WHERE table_schema = $1 AND table_name = 'messages' AND column_name = 'envelope_at_rest'`,
+    [env.SCHEMA],
+  );
+  if (messageEnvelope.rowCount !== 1) {
+    throw new Error('The configured schema is missing message envelope protection.');
+  }
+
   return existingTables;
 }

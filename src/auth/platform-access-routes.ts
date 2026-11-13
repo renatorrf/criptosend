@@ -1,19 +1,14 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 
-import { env } from '../config/env.js';
 import { AppError } from '../http/app-error.js';
 import type { AuthService } from './auth-service.js';
-import type {
-  DeviceInput,
-  RecoveryCredentialInput,
-} from './account-access-service.js';
+import type { DeviceInput } from './account-access-service.js';
 import { PlatformAccessService } from './platform-access-service.js';
 
 const uuid = z.uuid();
 const password = z.string().min(8).max(128);
 const username = z.string().trim().min(3).max(40);
-const nickname = z.string().trim().min(3).max(40);
 const base64 = z
   .string()
   .min(16)
@@ -27,40 +22,21 @@ const deviceSchema = z
     registrationId: z.number().int().min(0).max(2_147_483_647).optional(),
   })
   .strict();
-const recoverySchema = z
-  .object({
-    keyId: uuid,
-    publicKey: base64,
-    wrappedPrivateKey: base64,
-    wrappingIv: base64,
-    kdfSalt: base64,
-    kdfParameters: z
-      .object({
-        memorySize: z.number().int().min(19_456).max(262_144),
-        iterations: z.number().int().min(2).max(10),
-        parallelism: z.number().int().min(1).max(8),
-        hashLength: z.literal(32),
-      })
-      .strict(),
-  })
-  .strict();
 const loginSchema = z
   .object({ username, password: z.string().min(1).max(128), device: deviceSchema })
   .strict();
 const redeemSchema = z
   .object({
     invitationCode: z.string().trim().min(20).max(128),
-    name: z.string().trim().min(2).max(100),
     username,
-    nickname,
     password,
     device: deviceSchema,
-    recovery: recoverySchema,
   })
   .strict();
 const invitationSchema = z
   .object({
     role: z.enum(['MANAGER', 'USER']),
+    username,
     expiresInHours: z.number().int().min(1).max(24 * 30).default(72),
   })
   .strict();
@@ -77,17 +53,17 @@ const phoneSchema = z
 const changePasswordSchema = z
   .object({ currentPassword: z.string().min(1).max(128), newPassword: password })
   .strict();
-const usernameRecoveryStartSchema = z.object({ username }).strict();
-const usernameRecoveryCompleteSchema = z
-  .object({ recoveryId: uuid, signature: base64, newPassword: password })
-  .strict();
+const activationCheckSchema = z.object({
+  username,
+  invitationCode: z.string().trim().min(20).max(128),
+}).strict();
+const accessTokenCheckSchema = z.object({ token: z.string().trim().min(20).max(128) }).strict();
 const credentialResetCompleteSchema = z
   .object({
     username,
     token: z.string().trim().min(20).max(128),
     newPassword: password,
     device: deviceSchema,
-    recovery: recoverySchema,
   })
   .strict();
 
@@ -118,35 +94,15 @@ function mapDevice(input: z.infer<typeof deviceSchema>): DeviceInput {
   };
 }
 
-function mapRecovery(input: z.infer<typeof recoverySchema>): RecoveryCredentialInput {
-  return {
-    keyId: input.keyId,
-    publicKey: decode(input.publicKey, 64, 256),
-    wrappedPrivateKey: decode(input.wrappedPrivateKey, 48, 16_384),
-    wrappingIv: decode(input.wrappingIv, 12, 12),
-    kdfSalt: decode(input.kdfSalt, 16, 64),
-    kdfParameters: input.kdfParameters,
-  };
-}
-
 export function registerPlatformAccessRoutes(
   app: FastifyInstance,
   authService: AuthService,
 ): void {
   const service = new PlatformAccessService();
-  const cookieOptions = {
-    path: '/auth',
-    httpOnly: true,
-    secure: env.AUTH_COOKIE_SECURE,
-    sameSite: env.NODE_ENV === 'production' ? ('none' as const) : ('lax' as const),
-    partitioned: env.NODE_ENV === 'production',
-    maxAge: env.AUTH_REFRESH_TTL_SECONDS,
-  };
   const respondWithSession = (
     reply: FastifyReply,
     session: Awaited<ReturnType<PlatformAccessService['login']>>,
   ): unknown => {
-    reply.setCookie(env.AUTH_COOKIE_NAME, session.refreshToken, cookieOptions);
     return reply.send({
       accessToken: session.accessToken,
       refreshToken: session.refreshToken,
@@ -170,32 +126,6 @@ export function registerPlatformAccessRoutes(
   );
 
   app.post(
-    '/auth/username/recovery/start',
-    { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } },
-    async (request, reply) => {
-      const body = parse(usernameRecoveryStartSchema, request.body);
-      return reply
-        .code(202)
-        .send(await service.startPasswordRecovery(body.username, request.id));
-    },
-  );
-
-  app.post(
-    '/auth/username/recovery/complete',
-    { config: { rateLimit: { max: 5, timeWindow: '15 minutes' } } },
-    async (request, reply) => {
-      const body = parse(usernameRecoveryCompleteSchema, request.body);
-      await service.completePasswordRecovery(
-        body.recoveryId,
-        decode(body.signature, 64, 144),
-        body.newPassword,
-        request.id,
-      );
-      return reply.code(204).send();
-    },
-  );
-
-  app.post(
     '/auth/credential-reset/complete',
     { config: { rateLimit: { max: 5, timeWindow: '1 hour' } } },
     async (request, reply) => {
@@ -207,10 +137,28 @@ export function registerPlatformAccessRoutes(
           body.token,
           body.newPassword,
           mapDevice(body.device),
-          mapRecovery(body.recovery),
           request.id,
         ),
       );
+    },
+  );
+
+  app.post(
+    '/auth/invitations/check',
+    { config: { rateLimit: { max: 10, timeWindow: '15 minutes' } } },
+    async (request, reply) => {
+      const body = parse(activationCheckSchema, request.body);
+      await service.verifyInvitation(body.invitationCode, body.username);
+      return reply.code(204).send();
+    },
+  );
+
+  app.post(
+    '/auth/access-token/check',
+    { config: { rateLimit: { max: 10, timeWindow: '15 minutes' } } },
+    async (request) => {
+      const { token } = parse(accessTokenCheckSchema, request.body);
+      return service.verifyAccessToken(token);
     },
   );
 
@@ -224,12 +172,9 @@ export function registerPlatformAccessRoutes(
         reply,
         await service.redeemInvitation(
           body.invitationCode,
-          body.name,
           body.username,
-          body.nickname,
           body.password,
           mapDevice(body.device),
-          mapRecovery(body.recovery),
           request.id,
         ),
       );
@@ -241,7 +186,7 @@ export function registerPlatformAccessRoutes(
     const body = parse(invitationSchema, request.body);
     return reply
       .code(201)
-      .send(await service.createInvitation(actor, body.role, body.expiresInHours, request.id));
+      .send(await service.createInvitation(actor, body.role, body.username, body.expiresInHours, request.id));
   });
 
   app.get('/management/invitations', async (request) => {

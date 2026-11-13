@@ -8,6 +8,7 @@ import { quoteIdentifier } from '../database/identifier.js';
 import { databasePool } from '../database/pool.js';
 import { AppError } from '../http/app-error.js';
 import type { ConversationService } from '../conversations/conversation-service.js';
+import { openMessageEnvelope, sealMessageEnvelope } from './message-envelope-storage.js';
 
 const schema = quoteIdentifier(env.SCHEMA);
 const cursorSchema = z.object({ createdAt: z.iso.datetime(), id: z.uuid() }).strict();
@@ -20,6 +21,7 @@ interface MessageRow {
   client_message_id: string;
   ciphertext: Buffer;
   crypto_header: Buffer | null;
+  envelope_at_rest: Buffer | null;
   reply_to_message_id: string | null;
   created_at: Date;
   expires_at: Date | null;
@@ -41,14 +43,17 @@ async function beginTransaction(): Promise<PoolClient> {
 }
 
 function mapMessage(row: MessageRow): Record<string, unknown> {
+  const content = row.deleted_at ? null : row.envelope_at_rest
+    ? openMessageEnvelope(row.id, row.envelope_at_rest)
+    : { ciphertext: row.ciphertext, header: row.crypto_header };
   return {
     id: row.id,
     conversationId: row.conversation_id,
     senderUserId: row.sender_user_id,
     senderDeviceId: row.sender_device_id,
     clientMessageId: row.client_message_id,
-    ciphertext: row.deleted_at ? null : row.ciphertext.toString('base64'),
-    cryptoHeader: row.deleted_at ? null : row.crypto_header?.toString('base64') ?? null,
+    ciphertext: content?.ciphertext.toString('base64') ?? null,
+    cryptoHeader: content?.header?.toString('base64') ?? null,
     replyToMessageId: row.reply_to_message_id,
     createdAt: row.created_at,
     expiresAt: row.expires_at,
@@ -91,7 +96,7 @@ export class MessageService {
     const cursor = decodeCursor(cursorValue);
     const result = await databasePool.query<MessageRow>(
       `SELECT id, conversation_id, sender_user_id, sender_device_id,
-              client_message_id, ciphertext, crypto_header, reply_to_message_id,
+              client_message_id, ciphertext, crypto_header, envelope_at_rest, reply_to_message_id,
               created_at, expires_at, deleted_at, deletion_reason
        FROM ${schema}.messages
        WHERE conversation_id = $1
@@ -146,9 +151,9 @@ export class MessageService {
       const inserted = await client.query<MessageRow>(
         `INSERT INTO ${schema}.messages
            (id, conversation_id, sender_user_id, sender_device_id,
-            client_message_id, ciphertext, crypto_header, reply_to_message_id, expires_at)
+            client_message_id, ciphertext, envelope_at_rest, reply_to_message_id, expires_at)
          VALUES (
-           $1, $2, $3, $4, $5, $6, $7, $8,
+           $1, $2, $3, $4, $5, decode('00', 'hex'), $6, $7,
            (SELECT CASE
               WHEN message_retention_seconds IS NULL THEN NULL
               ELSE NOW() + (message_retention_seconds::text || ' seconds')::interval
@@ -157,7 +162,7 @@ export class MessageService {
          )
          ON CONFLICT (sender_device_id, client_message_id) DO NOTHING
          RETURNING id, conversation_id, sender_user_id, sender_device_id,
-                   client_message_id, ciphertext, crypto_header, reply_to_message_id,
+                   client_message_id, ciphertext, crypto_header, envelope_at_rest, reply_to_message_id,
                    created_at, expires_at, deleted_at, deletion_reason`,
         [
           id,
@@ -165,8 +170,7 @@ export class MessageService {
           userId,
           deviceId,
           input.clientMessageId,
-          input.ciphertext,
-          input.cryptoHeader,
+          sealMessageEnvelope(id, input.ciphertext, input.cryptoHeader),
           input.replyToMessageId,
         ],
       );
@@ -176,7 +180,7 @@ export class MessageService {
         created = false;
         const existing = await client.query<MessageRow>(
           `SELECT id, conversation_id, sender_user_id, sender_device_id,
-                  client_message_id, ciphertext, crypto_header, reply_to_message_id,
+                  client_message_id, ciphertext, crypto_header, envelope_at_rest, reply_to_message_id,
                   created_at, expires_at, deleted_at, deletion_reason
            FROM ${schema}.messages
            WHERE sender_device_id = $1 AND client_message_id = $2`,
@@ -197,8 +201,9 @@ export class MessageService {
           [row.id, conversationId, userId],
         );
       }
+      const message = mapMessage(row);
       await client.query('COMMIT');
-      return { message: mapMessage(row), created };
+      return { message, created };
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
@@ -418,6 +423,31 @@ export class MessageService {
         id,
         conversationId: conversation_id,
       }));
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async protectStoredEnvelopes(): Promise<void> {
+    const client = await beginTransaction();
+    try {
+      const batch = await client.query<Pick<MessageRow, 'id' | 'ciphertext' | 'crypto_header'>>(
+        `SELECT id, ciphertext, crypto_header FROM ${schema}.messages
+         WHERE envelope_at_rest IS NULL AND deleted_at IS NULL
+         ORDER BY id LIMIT 16 FOR UPDATE SKIP LOCKED`,
+      );
+      for (const row of batch.rows) {
+        await client.query(
+          `UPDATE ${schema}.messages
+           SET envelope_at_rest = $2, ciphertext = decode('00', 'hex'), crypto_header = NULL
+           WHERE id = $1`,
+          [row.id, sealMessageEnvelope(row.id, row.ciphertext, row.crypto_header)],
+        );
+      }
+      await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
