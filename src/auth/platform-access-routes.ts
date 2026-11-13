@@ -8,7 +8,7 @@ import { PlatformAccessService } from './platform-access-service.js';
 
 const uuid = z.uuid();
 const password = z.string().min(8).max(128);
-const username = z.string().trim().min(3).max(40);
+const username = z.string().trim().min(3).max(41);
 const base64 = z
   .string()
   .min(16)
@@ -29,6 +29,8 @@ const redeemSchema = z
   .object({
     invitationCode: z.string().trim().min(20).max(128),
     username,
+    // Older installed clients may still send this field.
+    name: z.string().trim().min(2).max(100).optional(),
     password,
     device: deviceSchema,
   })
@@ -36,13 +38,14 @@ const redeemSchema = z
 const invitationSchema = z
   .object({
     role: z.enum(['MANAGER', 'USER']),
-    username,
+    username: username.optional(),
     expiresInHours: z.number().int().min(1).max(24 * 30).default(72),
   })
-  .strict();
+  .strict()
+  .refine((body) => body.role === 'MANAGER' || body.username !== undefined);
 const statusSchema = z.object({ status: z.enum(['ACTIVE', 'SUSPENDED']) }).strict();
 const creditGrantSchema = z.object({ amount: z.number().int().min(1).max(1000) }).strict();
-const managerLookupSchema = z.object({ username: z.string().trim().min(3).max(40) }).strict();
+const managerLookupSchema = z.object({ username }).strict();
 const managerNetworkRequestSchema = z.object({ targetManagerId: uuid }).strict();
 const managerNetworkResponseSchema = z
   .object({ decision: z.enum(['ACCEPT', 'DECLINE']) })

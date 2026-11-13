@@ -25,6 +25,7 @@ import {
 const schema = quoteIdentifier(env.SCHEMA);
 const ACCESS_RESET_TTL_SECONDS = 24 * 60 * 60;
 const MANAGER_INVITATION_TTL_HOURS = 24;
+const unassignedManagerInvitationPattern = /^cm_[A-Za-z0-9_-]{32}$/;
 const accessResetTokenPattern = /^ar_([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})_[A-Za-z0-9_-]{43}$/;
 
 export type PlatformRole = 'PLATFORM_ADMIN' | 'MANAGER' | 'USER';
@@ -59,7 +60,7 @@ interface ActorRow {
 }
 
 export function normalizePlatformUsername(value: string): string {
-  const username = value.trim().normalize('NFKC').toLowerCase();
+  const username = value.trim().normalize('NFKC').replace(/^@/, '').toLowerCase();
   if (!/^[a-z0-9][a-z0-9._-]{2,39}$/.test(username)) {
     throw new AppError(400, 'INVALID_USERNAME');
   }
@@ -237,7 +238,9 @@ export class PlatformAccessService {
     await this.findInvitation(databasePool, code, username);
   }
 
-  async verifyAccessToken(code: string): Promise<{ kind: 'INVITATION' | 'RESET' | 'ADMIN_SETUP' }> {
+  async verifyAccessToken(code: string): Promise<
+    { kind: 'INVITATION' | 'RESET' | 'ADMIN_SETUP' } | { kind: 'INVITATION'; chooseIdentity: true }
+  > {
     const selector = accessResetTokenPattern.exec(code)?.[1];
     if (selector) {
       const result = await databasePool.query<{ token_hash: string; locked_until: Date | null; role: PlatformRole }>(
@@ -258,7 +261,10 @@ export class PlatformAccessService {
       return { kind: token?.role === 'PLATFORM_ADMIN' ? 'ADMIN_SETUP' : 'RESET' };
     }
     try {
-      await this.findInvitation(databasePool, code);
+      const invite = await this.findInvitation(databasePool, code);
+      if (invite.role === 'MANAGER' && invite.assigned_username === null) {
+        return { kind: 'INVITATION', chooseIdentity: true };
+      }
       return { kind: 'INVITATION' };
     } catch (error) {
       if (!(error instanceof AppError) || error.code !== 'INVALID_OR_EXPIRED_INVITATION') throw error;
@@ -279,8 +285,12 @@ export class PlatformAccessService {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [username]);
       const invite = await this.findInvitation(client, code, username, true);
       const existing = await client.query(
-        `SELECT 1 FROM ${schema}.users WHERE username = $1`,
-        [username],
+        `SELECT 1 FROM ${schema}.users WHERE username = $1
+         UNION ALL
+         SELECT 1 FROM ${schema}.invitation_codes
+         WHERE $2::boolean AND assigned_username = $1 AND used_at IS NULL
+           AND revoked_at IS NULL AND expires_at > clock_timestamp()`,
+        [username, invite.assigned_username === null],
       );
       if (existing.rowCount !== 0) throw new AppError(409, 'USERNAME_ALREADY_EXISTS');
 
@@ -381,6 +391,7 @@ export class PlatformAccessService {
     const inviteResult = await database.query<{
       id: string;
       role: Exclude<PlatformRole, 'PLATFORM_ADMIN'>;
+      assigned_username: string | null;
       created_by_user_id: string;
       creator_role: PlatformRole;
       creator_status: string;
@@ -388,15 +399,16 @@ export class PlatformAccessService {
       used_at: Date | null;
       revoked_at: Date | null;
     }>(
-      `SELECT i.id, i.role, i.created_by_user_id, i.expires_at <= clock_timestamp() AS expired,
+      `SELECT i.id, i.role, i.assigned_username, i.created_by_user_id,
+              i.expires_at <= clock_timestamp() AS expired,
               i.used_at, i.revoked_at, u.role AS creator_role,
               u.status AS creator_status
        FROM ${schema}.invitation_codes i
        JOIN ${schema}.users u ON u.id = i.created_by_user_id
-       WHERE i.code_hash = $1 AND i.assigned_username IS NOT NULL
-         AND ($2::text IS NULL OR i.assigned_username = $2)
+       WHERE i.code_hash = $1 AND (i.assigned_username IS NOT NULL OR (i.role = 'MANAGER' AND $3))
+         AND ($2::text IS NULL OR i.assigned_username = $2 OR i.assigned_username IS NULL)
        ${lock ? 'FOR UPDATE OF i' : ''}`,
-      [hashRefreshToken(code.trim()), username ?? null],
+      [hashRefreshToken(code.trim()), username ?? null, unassignedManagerInvitationPattern.test(code.trim())],
     );
     const invite = inviteResult.rows[0];
     const creatorCanInvite =
@@ -417,31 +429,36 @@ export class PlatformAccessService {
   async createInvitation(
     actor: AuthContext,
     role: Exclude<PlatformRole, 'PLATFORM_ADMIN'>,
-    usernameInput: string,
+    usernameInput: string | undefined,
     expiresInHours: number,
     requestId: string,
-  ): Promise<{ id: string; code: string; username: string; expiresAt: Date; role: string }> {
-    const username = normalizePlatformUsername(usernameInput);
+  ): Promise<{ id: string; code: string; username: string | null; expiresAt: Date; role: string }> {
     const actorRow = await this.actor(actor.userId);
     if (!canCreateInvitation(actorRow.role, role)) {
       throw new AppError(403, 'FORBIDDEN');
     }
+    if (role === 'USER' && usernameInput === undefined) {
+      throw new AppError(400, 'INVALID_USERNAME');
+    }
+    const username = usernameInput === undefined ? null : normalizePlatformUsername(usernameInput);
     const id = randomUUID();
-    const code = `cs_${randomBytes(24).toString('base64url')}`;
+    const code = `${username === null ? 'cm' : 'cs'}_${randomBytes(24).toString('base64url')}`;
     const ttlHours = role === 'USER' ? MANAGER_INVITATION_TTL_HOURS : expiresInHours;
     const client = await beginTransaction();
     try {
-      // Serialize reservations for this username, including requests from different managers.
-      await client.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [username]);
-      const reservedUsername = await client.query(
-        `SELECT 1 FROM ${schema}.users WHERE username = $1
-         UNION ALL
-         SELECT 1 FROM ${schema}.invitation_codes
-         WHERE assigned_username = $1 AND used_at IS NULL
-           AND revoked_at IS NULL AND expires_at > clock_timestamp()`,
-        [username],
-      );
-      if (reservedUsername.rowCount) throw new AppError(409, 'USERNAME_ALREADY_EXISTS');
+      if (username !== null) {
+        // Serialize username reservations and redemptions across networks.
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [username]);
+        const reservedUsername = await client.query(
+          `SELECT 1 FROM ${schema}.users WHERE username = $1
+           UNION ALL
+           SELECT 1 FROM ${schema}.invitation_codes
+           WHERE assigned_username = $1 AND used_at IS NULL
+             AND revoked_at IS NULL AND expires_at > clock_timestamp()`,
+          [username],
+        );
+        if (reservedUsername.rowCount) throw new AppError(409, 'USERNAME_ALREADY_EXISTS');
+      }
       if (role === 'USER') {
         const existingNickname = await client.query(
           `SELECT 1 FROM ${schema}.users
@@ -508,10 +525,12 @@ export class PlatformAccessService {
       used_at: Date | null;
       revoked_at: Date | null;
     }>(
-      `SELECT id, role, assigned_username, created_at, expires_at, used_at, revoked_at
-       FROM ${schema}.invitation_codes
-       WHERE created_by_user_id = $1 AND role = $2
-       ORDER BY created_at DESC LIMIT 100`,
+      `SELECT i.id, i.role, COALESCE(i.assigned_username, u.username) AS assigned_username,
+              i.created_at, i.expires_at, i.used_at, i.revoked_at
+       FROM ${schema}.invitation_codes i
+       LEFT JOIN ${schema}.users u ON u.id = i.used_by_user_id
+       WHERE i.created_by_user_id = $1 AND i.role = $2
+       ORDER BY i.created_at DESC LIMIT 100`,
       [actor.userId, actorRow.role === 'PLATFORM_ADMIN' ? 'MANAGER' : 'USER'],
     );
     return result.rows.map((invite) => ({
@@ -524,7 +543,7 @@ export class PlatformAccessService {
         ? 'REVOKED'
         : invite.used_at
           ? 'USED'
-          : !invite.assigned_username || invite.expires_at.getTime() <= Date.now()
+          : (invite.role === 'USER' && !invite.assigned_username) || invite.expires_at.getTime() <= Date.now()
             ? 'EXPIRED'
             : 'ACTIVE',
     }));

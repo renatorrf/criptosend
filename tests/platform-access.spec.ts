@@ -11,10 +11,12 @@ describe('platform access policy', () => {
   it('normalizes safe usernames consistently', () => {
     expect(normalizePlatformUsername('  Gestor.UM  ')).toBe('gestor.um');
     expect(normalizePlatformUsername('user_01')).toBe('user_01');
+    expect(normalizePlatformUsername('  @Gestora_01  ')).toBe('gestora_01');
+    expect(normalizePlatformUsername('@' + 'a'.repeat(40))).toBe('a'.repeat(40));
   });
 
   it('rejects usernames outside the public format', () => {
-    for (const username of ['ab', '.admin', 'usuário', 'nome com espaço']) {
+    for (const username of ['ab', '@ab', '@@admin', '.admin', 'usuário', 'nome com espaço', 'a'.repeat(41)]) {
       expect(() => normalizePlatformUsername(username)).toThrow(AppError);
     }
   });

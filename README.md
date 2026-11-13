@@ -75,7 +75,9 @@ A opção `--reset-existing` remove todas as contas e os dados operacionais do
 schema configurado, incluindo conversas, sessões e convites, na mesma transação
 que prepara a nova conta administrativa. O schema e as migrações são preservados.
 
-O administrador convida gestores e acompanha o saldo de cada gestor ativado.
+O administrador gera um token para o gestor, que escolhe seu @usuário e sua
+senha no primeiro acesso. Após a ativação, o gestor aparece no painel com seu
+saldo de convites.
 Cada gestor recebe 10 vagas inicialmente e convida somente usuários da sua
 equipe. O convite de usuário reserva uma vaga por até 24 horas. O cadastro
 consome a vaga, enquanto a expiração ou revogação libera a reserva.
