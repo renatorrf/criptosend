@@ -108,6 +108,7 @@ export async function rollbackLatest(): Promise<string | null> {
 
 export async function verifyTables(): Promise<string[]> {
   const expectedTables = [
+    'active_network_members',
     'auth_sessions',
     'account_recovery_credentials',
     'account_reset_requests',
@@ -119,6 +120,7 @@ export async function verifyTables(): Promise<string[]> {
     'message_receipts',
     'message_events',
     'messages',
+    'network_members',
     'push_subscriptions',
     'security_events',
     'phone_verification_challenges',
@@ -131,6 +133,7 @@ export async function verifyTables(): Promise<string[]> {
     'manager_recovery_tokens',
     'user_access_reset_tokens',
     'user_credentials',
+    'user_network_memberships',
     'users',
     'call_events',
     'call_participants',

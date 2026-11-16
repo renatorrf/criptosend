@@ -5,6 +5,7 @@ import { quoteIdentifier } from '../database/identifier.js';
 import { databasePool } from '../database/pool.js';
 import { AppError } from '../http/app-error.js';
 import { decryptField } from '../security/field-crypto.js';
+import { linkedManagersSql, sharedNetworksSql } from './network-access.js';
 
 const schema = quoteIdentifier(env.SCHEMA);
 const LOOKUP_LIMIT_PER_HOUR = 30;
@@ -19,11 +20,24 @@ function normalizeSearch(value: string): string {
 }
 
 export class UserService {
+  async listNetworks(userId: string): Promise<Array<{ id: string; name: string }>> {
+    const result = await databasePool.query<{ id: string; name_encrypted: Buffer }>(
+      `SELECT manager.id, manager.name_encrypted
+       FROM ${schema}.active_network_members membership
+       JOIN ${schema}.users manager ON manager.id = membership.manager_user_id
+       WHERE membership.user_id = $1
+       ORDER BY manager.nickname, manager.id`,
+      [userId],
+    );
+    return result.rows.map(({ id, name_encrypted }) => ({ id, name: decryptField(name_encrypted, 'user-name') }));
+  }
+
   async searchNetwork(
     userId: string,
     searchInput: string,
     limit: number,
     scope: 'network' | 'managed' = 'network',
+    networkId?: string,
   ): Promise<Array<{ id: string; name: string; nickname: string }>> {
     const result = await databasePool.query<{
       id: string;
@@ -37,24 +51,13 @@ export class UserService {
          AND actor.role <> 'PLATFORM_ADMIN'
          AND target.status = 'ACTIVE'
          AND (
-           ($2 = 'managed' AND actor.role = 'MANAGER' AND target.manager_user_id = actor.id)
-           OR ($2 = 'network' AND (
-             COALESCE(target.manager_user_id, target.id) =
-                COALESCE(actor.manager_user_id, actor.id)
-             OR (
-               actor.role = 'MANAGER'
-               AND target.role = 'MANAGER'
-               AND EXISTS (
-                 SELECT 1 FROM ${schema}.manager_network_links link
-                 WHERE link.manager_low_id = LEAST(actor.id, target.id)
-                   AND link.manager_high_id = GREATEST(actor.id, target.id)
-               )
-             )
-           ))
+           (EXISTS (${sharedNetworksSql} AND ($3::uuid IS NULL OR mine.manager_user_id = $3))
+             AND ($2 = 'network' OR actor.role = 'MANAGER'))
+           OR ($2 = 'network' AND $3::uuid IS NULL AND (${linkedManagersSql}))
          )
        ORDER BY target.nickname
        LIMIT 250`,
-      [userId, scope],
+      [userId, scope, networkId ?? null],
     );
     const search = normalizeSearch(searchInput);
     return result.rows
@@ -103,19 +106,9 @@ export class UserService {
          AND target.id <> $2
          AND target.status = 'ACTIVE'
          AND (
-           COALESCE(target.manager_user_id, target.id) =
-             COALESCE(actor.manager_user_id, actor.id)
-           OR (
-             actor.role = 'MANAGER'
-             AND target.role = 'MANAGER'
-             AND EXISTS (
-               SELECT 1 FROM ${schema}.manager_network_links link
-               WHERE link.manager_low_id = LEAST(actor.id, target.id)
-                 AND link.manager_high_id = GREATEST(actor.id, target.id)
-             )
-           )
+           EXISTS (${sharedNetworksSql}) OR (${linkedManagersSql})
          )
-       LIMIT 1`,
+       LIMIT 2`,
       [nickname, userId],
     );
     await databasePool.query(
@@ -124,7 +117,7 @@ export class UserService {
        VALUES ($1, $2, $3, 'USER_LOOKUP', 'SUCCESS', $4)`,
       [randomUUID(), userId, deviceId, requestId],
     );
-    const found = result.rows[0];
+    const found = result.rows.length === 1 ? result.rows[0] : undefined;
     return found
       ? {
           id: found.id,

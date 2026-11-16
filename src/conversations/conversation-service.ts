@@ -7,6 +7,7 @@ import { quoteIdentifier } from '../database/identifier.js';
 import { databasePool } from '../database/pool.js';
 import { AppError } from '../http/app-error.js';
 import { decryptField, encryptField } from '../security/field-crypto.js';
+import { linkedManagersSql, sharedNetworksSql } from '../users/network-access.js';
 
 const schema = quoteIdentifier(env.SCHEMA);
 const MAXIMUM_GROUP_MEMBERS = 50;
@@ -24,6 +25,7 @@ interface DirectConversationRow extends ConversationBaseRow {
   peer_user_id: string;
   peer_name_encrypted: Buffer;
   peer_nickname: string;
+  network_ids: string[];
 }
 
 interface GroupConversationRow extends ConversationBaseRow {
@@ -80,6 +82,7 @@ function mapDirect(
   return {
     id: row.id,
     type: 'DIRECT',
+    networkIds: row.network_ids,
     createdAt: row.created_at,
     peer: {
       id: row.peer_user_id,
@@ -107,6 +110,7 @@ function mapGroup(
   return {
     id: row.id,
     type: 'GROUP',
+    networkIds: [row.created_by_user_id],
     createdAt: row.created_at,
     name: decryptField(row.group_name_encrypted, 'group-name'),
     createdByUserId: row.created_by_user_id,
@@ -188,22 +192,13 @@ export class ConversationService {
          AND target.id <> $2
          AND target.status = 'ACTIVE'
          AND (
-           COALESCE(target.manager_user_id, target.id) =
-             COALESCE(actor.manager_user_id, actor.id)
-           OR (
-             actor.role = 'MANAGER'
-             AND target.role = 'MANAGER'
-             AND EXISTS (
-               SELECT 1 FROM ${schema}.manager_network_links link
-               WHERE link.manager_low_id = LEAST(actor.id, target.id)
-                 AND link.manager_high_id = GREATEST(actor.id, target.id)
-             )
-           )
+           EXISTS (${sharedNetworksSql}) OR (${linkedManagersSql})
          )
-       LIMIT 1`,
+       LIMIT 2`,
       [byId ? target.userId : normalizeNickname(target.nickname), userId],
     );
     const targetUserId = targetResult.rows[0]?.id;
+    if (targetResult.rows.length > 1) throw new AppError(409, 'AMBIGUOUS_NICKNAME');
     if (!targetUserId) throw new AppError(404, 'CONTACT_NOT_FOUND');
 
     const client = await beginTransaction();
@@ -254,11 +249,10 @@ export class ConversationService {
     if (actor.rows[0]?.role !== 'MANAGER') throw new AppError(403, 'FORBIDDEN');
 
     const members = await databasePool.query<{ id: string }>(
-      `SELECT id
-       FROM ${schema}.users
-       WHERE manager_user_id = $1
-         AND nickname = ANY($2::text[])
-         AND status = 'ACTIVE'`,
+      `SELECT target.id
+       FROM ${schema}.active_network_members membership
+       JOIN ${schema}.users target ON target.id = membership.user_id AND target.role = 'USER'
+       WHERE membership.manager_user_id = $1 AND target.nickname = ANY($2::text[])`,
       [userId, nicknames],
     );
     if (members.rowCount !== nicknames.length) {
@@ -294,7 +288,8 @@ export class ConversationService {
     const [directResult, groupResult] = await Promise.all([
       databasePool.query<DirectConversationRow>(
         `SELECT c.id, c.created_at, peer.user_id AS peer_user_id,
-                u.name_encrypted AS peer_name_encrypted, u.nickname AS peer_nickname,
+                target.name_encrypted AS peer_name_encrypted, target.nickname AS peer_nickname,
+                ARRAY(${sharedNetworksSql}) AS network_ids,
                 last_message.id AS last_message_id,
                 last_message.created_at AS last_message_at,
                 last_message.deleted_at AS last_message_deleted_at,
@@ -304,7 +299,7 @@ export class ConversationService {
            ON mine.conversation_id = c.id AND mine.user_id = $1 AND mine.status = 'ACTIVE'
          JOIN ${schema}.conversation_members peer
            ON peer.conversation_id = c.id AND peer.user_id <> $1 AND peer.status = 'ACTIVE'
-         JOIN ${schema}.users u ON u.id = peer.user_id AND u.status = 'ACTIVE'
+         JOIN ${schema}.users target ON target.id = peer.user_id AND target.status = 'ACTIVE'
          JOIN ${schema}.users actor ON actor.id = $1
          ${lastMessageSql}
          WHERE c.type = 'DIRECT'`,

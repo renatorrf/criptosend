@@ -239,7 +239,7 @@ export class PlatformAccessService {
   }
 
   async verifyAccessToken(code: string): Promise<
-    { kind: 'INVITATION' | 'RESET' | 'ADMIN_SETUP' } | { kind: 'INVITATION'; chooseIdentity: true }
+    { kind: 'INVITATION' | 'RESET' | 'ADMIN_SETUP'; chooseIdentity?: true; networkName?: string }
   > {
     const selector = accessResetTokenPattern.exec(code)?.[1];
     if (selector) {
@@ -262,10 +262,11 @@ export class PlatformAccessService {
     }
     try {
       const invite = await this.findInvitation(databasePool, code);
-      if (invite.assigned_username === null) {
-        return { kind: 'INVITATION', chooseIdentity: true };
-      }
-      return { kind: 'INVITATION' };
+      return {
+        kind: 'INVITATION',
+        ...(invite.assigned_username === null ? { chooseIdentity: true as const } : {}),
+        ...(invite.role === 'USER' ? { networkName: decryptField(invite.creator_name_encrypted, 'user-name') } : {}),
+      };
     } catch (error) {
       if (!(error instanceof AppError) || error.code !== 'INVALID_OR_EXPIRED_INVITATION') throw error;
       throw new AppError(400, 'INVALID_ACCESS_TOKEN');
@@ -296,16 +297,7 @@ export class PlatformAccessService {
 
       const managerUserId = invite.role === 'USER' ? invite.created_by_user_id : null;
       if (managerUserId) {
-        const existingNickname = await client.query(
-          `SELECT 1
-           FROM ${schema}.users
-           WHERE COALESCE(manager_user_id, id) = $1
-             AND nickname = $2`,
-          [managerUserId, username],
-        );
-        if (existingNickname.rowCount !== 0) {
-          throw new AppError(409, 'NICKNAME_ALREADY_EXISTS');
-        }
+        await this.reserveNetworkNickname(client, managerUserId, username);
       }
 
       const userId = randomUUID();
@@ -330,18 +322,8 @@ export class PlatformAccessService {
            ON CONFLICT (manager_user_id) DO NOTHING`,
           [userId],
         );
-      } else if (invite.creator_role === 'MANAGER') {
-        const balance = await client.query(
-          `UPDATE ${schema}.manager_invitation_balances
-           SET available_credits = available_credits - 1,
-               consumed_credits = consumed_credits + 1
-           WHERE manager_user_id = $1 AND available_credits > 0
-           RETURNING manager_user_id`,
-          [invite.created_by_user_id],
-        );
-        if (balance.rowCount !== 1) {
-          throw new AppError(409, 'INVITATION_QUOTA_EXHAUSTED');
-        }
+      } else if (managerUserId) {
+        await this.consumeNetworkInvitationCredit(client, managerUserId);
       }
       await client.query(
         `INSERT INTO ${schema}.user_credentials (user_id, password_hash)
@@ -349,13 +331,7 @@ export class PlatformAccessService {
         [userId, await hashPassword(password)],
       );
       const deviceId = await insertDevice(client, userId, device);
-      const redeemed = await client.query(
-        `UPDATE ${schema}.invitation_codes
-         SET used_by_user_id = $2, used_at = clock_timestamp()
-         WHERE id = $1 AND expires_at > clock_timestamp()`,
-        [invite.id, userId],
-      );
-      if (redeemed.rowCount !== 1) throw new AppError(400, 'INVALID_OR_EXPIRED_INVITATION');
+      await this.markInvitationUsed(client, invite.id, userId);
       const session = await createSession(client, userId, deviceId);
       await recordEvent(client, 'INVITATION_REDEEMED', requestId, userId, deviceId);
       await client.query('COMMIT');
@@ -382,6 +358,72 @@ export class PlatformAccessService {
     }
   }
 
+  async joinInvitedNetwork(actor: AuthContext, code: string, requestId: string): Promise<{ networkId: string }> {
+    const client = await beginTransaction();
+    try {
+      const user = (await client.query<{ username: string; nickname: string; manager_user_id: string | null }>(
+        `SELECT username, nickname, manager_user_id
+         FROM ${schema}.users WHERE id = $1 AND role = 'USER' AND status = 'ACTIVE'`,
+        [actor.userId],
+      )).rows[0];
+      if (!user?.username) throw new AppError(403, 'NETWORK_INVITATION_USER_ONLY');
+      const invite = await this.findInvitation(client, code, user.username, true);
+      if (invite.role !== 'USER') throw new AppError(400, 'INVALID_OR_EXPIRED_INVITATION');
+      const managerId = invite.created_by_user_id;
+      if (user.manager_user_id === managerId) throw new AppError(409, 'NETWORK_MEMBERSHIP_EXISTS');
+      await this.reserveNetworkNickname(client, managerId, user.nickname, actor.userId);
+      const joined = await client.query(
+        `INSERT INTO ${schema}.user_network_memberships (manager_user_id, user_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [managerId, actor.userId],
+      );
+      if (!joined.rowCount) throw new AppError(409, 'NETWORK_MEMBERSHIP_EXISTS');
+      await this.consumeNetworkInvitationCredit(client, managerId);
+      await this.markInvitationUsed(client, invite.id, actor.userId);
+      await recordEvent(client, 'INVITATION_REDEEMED', requestId, actor.userId, actor.deviceId);
+      await client.query('COMMIT');
+      return { networkId: managerId };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  private async reserveNetworkNickname(client: PoolClient, managerId: string, nickname: string, userId?: string): Promise<void> {
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [`network:${managerId}:${nickname}`]);
+    const result = await client.query(
+      `SELECT 1 FROM ${schema}.users member
+       WHERE member.nickname = $2 AND member.id IS DISTINCT FROM $3::uuid
+         AND (member.id = $1 OR EXISTS (
+           SELECT 1 FROM ${schema}.network_members membership
+           WHERE membership.manager_user_id = $1 AND membership.user_id = member.id
+         ))`,
+      [managerId, nickname, userId ?? null],
+    );
+    if (result.rowCount) throw new AppError(409, 'NICKNAME_ALREADY_EXISTS');
+  }
+
+  private async consumeNetworkInvitationCredit(client: PoolClient, managerId: string): Promise<void> {
+    const result = await client.query(
+      `UPDATE ${schema}.manager_invitation_balances
+       SET available_credits = available_credits - 1, consumed_credits = consumed_credits + 1
+       WHERE manager_user_id = $1 AND available_credits > 0`,
+      [managerId],
+    );
+    if (result.rowCount !== 1) throw new AppError(409, 'INVITATION_QUOTA_EXHAUSTED');
+  }
+
+  private async markInvitationUsed(client: PoolClient, invitationId: string, userId: string): Promise<void> {
+    const result = await client.query(
+      `UPDATE ${schema}.invitation_codes SET used_by_user_id = $2, used_at = clock_timestamp()
+       WHERE id = $1 AND expires_at > clock_timestamp()`,
+      [invitationId, userId],
+    );
+    if (result.rowCount !== 1) throw new AppError(400, 'INVALID_OR_EXPIRED_INVITATION');
+  }
+
   private async findInvitation(
     database: Pick<PoolClient, 'query'>,
     code: string,
@@ -394,6 +436,7 @@ export class PlatformAccessService {
       assigned_username: string | null;
       created_by_user_id: string;
       creator_role: PlatformRole;
+      creator_name_encrypted: Buffer;
       creator_status: string;
       expired: boolean;
       used_at: Date | null;
@@ -402,7 +445,7 @@ export class PlatformAccessService {
       `SELECT i.id, i.role, i.assigned_username, i.created_by_user_id,
               i.expires_at <= clock_timestamp() AS expired,
               i.used_at, i.revoked_at, u.role AS creator_role,
-              u.status AS creator_status
+              u.status AS creator_status, u.name_encrypted AS creator_name_encrypted
        FROM ${schema}.invitation_codes i
        JOIN ${schema}.users u ON u.id = i.created_by_user_id
        WHERE i.code_hash = $1
@@ -458,12 +501,7 @@ export class PlatformAccessService {
         if (reservedUsername.rowCount) throw new AppError(409, 'USERNAME_ALREADY_EXISTS');
       }
       if (role === 'USER' && username !== null) {
-        const existingNickname = await client.query(
-          `SELECT 1 FROM ${schema}.users
-           WHERE COALESCE(manager_user_id, id) = $1 AND nickname = $2`,
-          [actor.userId, username],
-        );
-        if (existingNickname.rowCount) throw new AppError(409, 'NICKNAME_ALREADY_EXISTS');
+        await this.reserveNetworkNickname(client, actor.userId, username);
       }
 
       if (actorRow.role === 'MANAGER' && role === 'USER') {
@@ -571,10 +609,11 @@ export class PlatformAccessService {
       remaining_invitations: number | null;
       next_expiration_at: Date | null;
       reset_required_at: Date | null;
+      can_manage_access: boolean;
     }>(
       actorRow.role === 'PLATFORM_ADMIN'
         ? `SELECT u.id, u.username, u.name_encrypted, u.role, u.status,
-                  c.reset_required_at,
+                  c.reset_required_at, TRUE AS can_manage_access,
                   GREATEST(0, COALESCE(b.available_credits, 0) - pending.count) AS remaining_invitations,
                   pending.next_expiration_at
            FROM ${schema}.users u
@@ -592,12 +631,14 @@ export class PlatformAccessService {
            ) pending
            WHERE u.role = 'MANAGER' ORDER BY u.created_at DESC`
         : `SELECT u.id, u.username, u.name_encrypted, u.role, u.status,
-                  c.reset_required_at,
+                  CASE WHEN u.manager_user_id = $1 THEN c.reset_required_at END AS reset_required_at,
+                  COALESCE(u.manager_user_id = $1, FALSE) AS can_manage_access,
                   NULL::INTEGER AS remaining_invitations,
                   NULL::TIMESTAMPTZ AS next_expiration_at
            FROM ${schema}.users u
+           JOIN ${schema}.network_members membership ON membership.user_id = u.id
            JOIN ${schema}.user_credentials c ON c.user_id = u.id
-           WHERE u.manager_user_id = $1 AND u.role = 'USER' ORDER BY u.created_at DESC`,
+           WHERE membership.manager_user_id = $1 AND u.role = 'USER' ORDER BY u.created_at DESC`,
       actorRow.role === 'PLATFORM_ADMIN' ? [] : [actor.userId],
     );
     return result.rows.map((user) => ({
@@ -607,6 +648,7 @@ export class PlatformAccessService {
       role: user.role,
       status: user.status,
       resetRequired: user.reset_required_at !== null,
+      canManageAccess: user.can_manage_access,
       ...(user.remaining_invitations !== null
         ? {
             remainingInvitations: user.remaining_invitations,

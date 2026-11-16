@@ -10,6 +10,7 @@ const directorySchema = z.object({
   search: z.string().trim().max(80).default(''),
   limit: z.coerce.number().int().min(1).max(50).default(50),
   scope: z.enum(['network', 'managed']).default('network'),
+  networkId: z.uuid().optional(),
 }).strict();
 
 export function registerUserRoutes(
@@ -17,6 +18,11 @@ export function registerUserRoutes(
   authService: AuthService,
 ): void {
   const service = new UserService();
+
+  app.get('/users/networks', async (request) => {
+    const auth = await authService.authenticate(request.headers.authorization);
+    return { networks: await service.listNetworks(auth.userId) };
+  });
 
   app.get(
     '/users',
@@ -31,6 +37,7 @@ export function registerUserRoutes(
           parsed.data.search,
           parsed.data.limit,
           parsed.data.scope,
+          parsed.data.networkId,
         ),
       };
     },

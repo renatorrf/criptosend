@@ -191,6 +191,17 @@ export function registerPlatformAccessRoutes(
       .send(await service.createInvitation(actor, body.role, body.username, body.expiresInHours, request.id));
   });
 
+  app.post(
+    '/auth/invitations/join-network',
+    { config: { rateLimit: { max: 10, timeWindow: '15 minutes' } } },
+    async (request, reply) => {
+      reply.header('cache-control', 'no-store');
+      const actor = await authService.authenticate(request.headers.authorization);
+      const { token } = parse(accessTokenCheckSchema, request.body);
+      return service.joinInvitedNetwork(actor, token, request.id);
+    },
+  );
+
   app.get('/management/invitations', async (request) => {
     const actor = await authService.authenticate(request.headers.authorization);
     return { invitations: await service.listInvitations(actor) };
